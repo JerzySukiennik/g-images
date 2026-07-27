@@ -61,8 +61,12 @@ def main(args):
 
     ckpt = torch.load(args.ckpt, map_location=device)
     model = UNet().to(device).eval()
-    model.load_state_dict(ckpt["model"])
-    print(f"checkpoint step {ckpt['step']}")
+    if "ema" in ckpt and not args.no_ema:
+        model.load_state_dict({k: v.to(model.state_dict()[k].dtype) for k, v in ckpt["ema"].items()})
+        print(f"checkpoint step {ckpt['step']} (EMA weights)")
+    else:
+        model.load_state_dict(ckpt["model"])
+        print(f"checkpoint step {ckpt['step']} (raw weights)")
 
     print("loading frozen CLIP text encoder...")
     encoder = ClipTextEncoder(device=device)
@@ -84,7 +88,9 @@ def main(args):
                 out = schedule.ddim_sample(
                     model, before, text_seq[pi:pi + 1], steps=args.steps, device=device,
                     text_uncond=text_uncond_one, guidance=s,
-                    image_guidance=args.image_guidance)
+                    image_guidance=args.image_guidance,
+                    guidance_rescale=args.guidance_rescale,
+                    dynamic_threshold=args.dynamic_threshold)
             cols.append(to_img(out[0]))
             print(f"  [{prompt!r}] guidance={s} done", flush=True)
         rows.append(np.concatenate(cols, axis=1))
@@ -112,5 +118,12 @@ if __name__ == "__main__":
                     help=">1.0 adds the zeroed-`before` unconditional branch (3 passes "
                          "per step, and off-distribution until conditioning dropout is trained)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--guidance-rescale", type=float, default=0.0,
+                    help="0..1, Lin et al. guidance rescale; 0.7 is the paper's value")
+    p.add_argument("--dynamic-threshold", type=float, default=0.0,
+                    help="percentile for Imagen dynamic thresholding, e.g. 0.995; "
+                         "0 keeps the plain clamp to [-1,1]")
+    p.add_argument("--no-ema", action="store_true",
+                    help="sample from the raw weights even when the checkpoint has EMA")
     p.add_argument("--out", default="./cfg_sweep.png")
     main(p.parse_args())

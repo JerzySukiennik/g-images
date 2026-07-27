@@ -7,6 +7,17 @@ working model (see SPEC.md).
 import torch
 
 
+def _quantile(flat, q):
+    """Per-row quantile of a [B, N] tensor. torch.quantile isn't implemented
+    for every MPS build and silently differs across versions, so this uses
+    sort+index, which behaves identically everywhere this runs (Mac MPS/CPU
+    for the local checks, CUDA on Kaggle).
+    """
+    n = flat.shape[1]
+    k = max(0, min(n - 1, int(round(q * (n - 1)))))
+    return flat.sort(dim=1).values[:, k]
+
+
 class DiffusionSchedule:
     def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=2e-2, device="cpu"):
         self.timesteps = timesteps
@@ -29,6 +40,7 @@ class DiffusionSchedule:
     @torch.no_grad()
     def ddim_sample(self, model, before, text_emb, steps=100, device="cpu",
                     text_uncond=None, guidance=1.0, image_guidance=1.0,
+                    guidance_rescale=0.0, dynamic_threshold=0.0,
                     generator=None):
         """Deterministic (eta=0) DDIM sampler, `steps` << self.timesteps.
 
@@ -82,10 +94,35 @@ class DiffusionSchedule:
                     pred_noise = (e_uncond
                                   + image_guidance * (e_image - e_uncond)
                                   + guidance * (e_full - e_image))
+                if guidance_rescale > 0:
+                    # Guidance rescale (Lin et al. 2024). Amplifying the
+                    # conditional difference also inflates the magnitude of the
+                    # predicted noise; the reconstructed x0 then overshoots
+                    # [-1,1] and the clamp below flattens whole regions to
+                    # channel extremes — the flat psychedelic patches seen at
+                    # scale >= 5 on the step-70000 checkpoint. Scaling the
+                    # guided prediction back to the conditional branch's own
+                    # standard deviation removes the overshoot without
+                    # weakening the direction of the edit.
+                    std_cond = e_full.std(dim=(1, 2, 3), keepdim=True)
+                    std_cfg = pred_noise.std(dim=(1, 2, 3), keepdim=True).clamp(min=1e-6)
+                    pred_noise = (guidance_rescale * (pred_noise * std_cond / std_cfg)
+                                  + (1 - guidance_rescale) * pred_noise)
             else:
                 pred_noise = model(torch.cat([x, before], dim=1), t_batch, text_emb)
             a_t = acp[t]
-            x0_pred = ((x - (1 - a_t).sqrt() * pred_noise) / a_t.sqrt()).clamp(-1, 1)
+            x0_pred = (x - (1 - a_t).sqrt() * pred_noise) / a_t.sqrt()
+            if dynamic_threshold > 0:
+                # Imagen's dynamic thresholding: instead of hard-clipping the
+                # overshoot away (which destroys contrast by pinning pixels to
+                # +-1), rescale the whole image by its own high percentile so
+                # the outliers come back into range and relative structure
+                # survives.
+                flat = x0_pred.abs().reshape(b, -1)
+                s = _quantile(flat, dynamic_threshold).clamp(min=1.0).view(-1, 1, 1, 1)
+                x0_pred = x0_pred.clamp(-s, s) / s
+            else:
+                x0_pred = x0_pred.clamp(-1, 1)
             if i == len(seq) - 1:
                 x = x0_pred
                 break

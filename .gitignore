@@ -14,3 +14,6 @@ run/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Kaggle orchestration working dir (checkpoints, kernel metadata)
+kaggle-run/
