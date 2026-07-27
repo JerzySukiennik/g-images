@@ -38,20 +38,30 @@ def main(args):
 
     ckpt = torch.load(args.ckpt, map_location=device)
     model = UNet().to(device).eval()
-    model.load_state_dict(ckpt["model"])
-    print(f"loaded checkpoint at step {ckpt['step']}")
+    # Sample from the EMA weights when the checkpoint has them — that's what
+    # they're for. Checkpoints from before train/train.py tracked EMA only have
+    # "model", so this stays backward compatible.
+    if "ema" in ckpt and not args.no_ema:
+        model.load_state_dict({k: v.to(model.state_dict()[k].dtype) for k, v in ckpt["ema"].items()})
+        print(f"loaded checkpoint at step {ckpt['step']} (EMA weights)")
+    else:
+        model.load_state_dict(ckpt["model"])
+        print(f"loaded checkpoint at step {ckpt['step']} (raw weights)")
 
     print("loading CLIP text encoder (frozen, first run downloads it)...")
     encoder = ClipTextEncoder(device=device)
-    text_seq = encoder.encode([args.prompt])
+    text_seq = encoder.encode([args.prompt]).to(device)
+    text_uncond = encoder.encode([""]).to(device) if args.guidance != 1.0 else None
 
     before = load_image(args.image, args.res).unsqueeze(0).to(device)
-    text_seq = text_seq.to(device)
 
     schedule = DiffusionSchedule(device=device)
-    print(f"sampling ({args.steps} DDIM steps)...")
+    print(f"sampling ({args.steps} DDIM steps, guidance {args.guidance})...")
     with torch.no_grad():
-        generated = schedule.ddim_sample(model, before, text_seq, steps=args.steps, device=device)
+        generated = schedule.ddim_sample(
+            model, before, text_seq, steps=args.steps, device=device,
+            text_uncond=text_uncond, guidance=args.guidance,
+            image_guidance=args.image_guidance)
 
     grid = np.concatenate([to_img(before[0]), to_img(generated[0])], axis=1)
     Image.fromarray(grid).save(args.out)
@@ -72,5 +82,17 @@ if __name__ == "__main__":
                          "sampling-discretization artifact, not (only) undertraining — "
                          "100 steps on the SAME checkpoint showed real structure/color the "
                          "20-step version hid. Don't judge cross-attention quality at <50.")
+    p.add_argument("--guidance", type=float, default=1.0,
+                    help="classifier-free guidance scale on the text. 1.0 = the raw model "
+                         "prediction, which is how every test before 2026-07-27 was run and "
+                         "why edits barely showed. InstructPix2Pix uses ~7.5, but until a "
+                         "checkpoint is trained with conditioning dropout, scales above ~3 "
+                         "saturate into colour garbage (measured on step 48400 — see "
+                         "runtime/cfg_test.py). Raise the default once such a checkpoint exists.")
+    p.add_argument("--image-guidance", type=float, default=1.0,
+                    help="second IP2P scale, on `before` (~1.5 there). Needs a checkpoint "
+                         "trained with --image-dropout; costs a third forward pass per step.")
+    p.add_argument("--no-ema", action="store_true",
+                    help="sample from the raw weights even when the checkpoint has EMA")
     p.add_argument("--out", default="./edited.png")
     main(p.parse_args())

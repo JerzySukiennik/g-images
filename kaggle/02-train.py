@@ -37,7 +37,27 @@ OUT = f"{WORK}/run"
 # some point, and catching a plateau/regression early avoids wasting
 # further GPU quota chasing it. Still a ceiling, not a target — ckpt.pt is
 # written every CKPT_EVERY steps regardless, safe to grab and stop early.
+# 2026-07-27, after step 48400 still would not follow "make it black and
+# white". A guidance sweep on that very checkpoint (runtime/cfg_test.py) found
+# the biggest single problem was never the training at all: every judgement so
+# far was made at guidance scale 1.0, i.e. the raw model prediction. With
+# guidance the prompt's effect is large and correctly directed (b&w went grey,
+# "add a hat" kept its colour) — but above ~3 the image saturates into colour
+# garbage, because nothing ever trained the unconditional branch that guidance
+# interpolates from.
+#
+# So train/train.py now defaults to conditioning dropout (5% text, 5% image),
+# EMA weights, Min-SNR-gamma loss weighting, cosine LR decay and h-flip
+# augmentation — no architecture change, so the step-48400 checkpoint resumes
+# straight into it (verified locally). Nothing below needs new flags; those are
+# the defaults. What this run has to prove is that guidance 5-7.5 becomes
+# usable instead of saturating.
+#
+# LR_DECAY_STEPS is separate from STEPS on purpose: STEPS is a ceiling that
+# gets raised whenever quality is still climbing, and tying the LR schedule to
+# it would jump the LR back up on every raise.
 BATCH, ACCUM, STEPS, WARMUP = 32, 1, 70000, 200
+LR_DECAY_STEPS = 100000
 
 if os.path.exists(f"{WORK}/gedit"):
     subprocess.run(["git", "-C", f"{WORK}/gedit", "pull", "--ff-only"], check=True)
@@ -80,6 +100,7 @@ cmd = [sys.executable, "train/train.py",
        "--batch-size", str(BATCH),
        "--grad-accum", str(ACCUM),
        "--max-steps", str(STEPS),
+       "--lr-decay-steps", str(LR_DECAY_STEPS),
        "--warmup", str(WARMUP),
        "--eval-every", "200",
        "--ckpt-every", "200",

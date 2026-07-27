@@ -52,8 +52,12 @@ def main(args):
 
     model = UNet(text_dim=text_dim).to(device).eval()
     ckpt = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(ckpt["model"])
-    print(f"loaded checkpoint at step {ckpt['step']}")
+    if "ema" in ckpt and not args.no_ema:
+        model.load_state_dict({k: v.to(model.state_dict()[k].dtype) for k, v in ckpt["ema"].items()})
+        print(f"loaded checkpoint at step {ckpt['step']} (EMA weights)")
+    else:
+        model.load_state_dict(ckpt["model"])
+        print(f"loaded checkpoint at step {ckpt['step']} (raw weights)")
 
     schedule = DiffusionSchedule(device=device)
 
@@ -61,8 +65,21 @@ def main(args):
     after_real = torch.from_numpy(images[idx, 1].copy()).float().to(device) / 127.5 - 1.0
     text_emb = torch.from_numpy(text[idx].copy()).to(device)
 
+    # Guidance needs a null-text embedding, which the packed dataset doesn't
+    # carry — so CLIP is loaded only when guidance is actually asked for,
+    # keeping the default path network-free as documented above.
+    text_uncond = None
+    if args.guidance != 1.0:
+        from model.clip_encoder import ClipTextEncoder
+        print("guidance requested — loading frozen CLIP for the null-text embedding...")
+        enc = ClipTextEncoder(device=device)
+        text_uncond = enc.encode([""]).to(device).expand(len(idx), -1, -1)
+
     with torch.no_grad():
-        generated = schedule.ddim_sample(model, before, text_emb, steps=args.steps, device=device)
+        generated = schedule.ddim_sample(
+            model, before, text_emb, steps=args.steps, device=device,
+            text_uncond=text_uncond, guidance=args.guidance,
+            image_guidance=args.image_guidance)
 
     rows = [np.concatenate([to_img(before[i]), to_img(after_real[i]), to_img(generated[i])], axis=1)
             for i in range(len(idx))]
@@ -81,5 +98,12 @@ if __name__ == "__main__":
     p.add_argument("--steps", type=int, default=100,
                     help="DDIM sampling steps — see runtime/edit_photo.py's --steps help "
                          "for why this isn't 20 anymore.")
+    p.add_argument("--guidance", type=float, default=1.0,
+                    help="classifier-free guidance on the text — see runtime/edit_photo.py's "
+                         "--guidance help. Anything other than 1.0 loads CLIP (network on "
+                         "first run) for the null-text embedding.")
+    p.add_argument("--image-guidance", type=float, default=1.0)
+    p.add_argument("--no-ema", action="store_true",
+                    help="sample from the raw weights even when the checkpoint has EMA")
     p.add_argument("--out", default="./sample_check.png")
     main(p.parse_args())

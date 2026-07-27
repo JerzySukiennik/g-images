@@ -27,7 +27,9 @@ class DiffusionSchedule:
         return sqrt_acp * x0 + sqrt_1macp * noise, noise
 
     @torch.no_grad()
-    def ddim_sample(self, model, before, text_emb, steps=100, device="cpu"):
+    def ddim_sample(self, model, before, text_emb, steps=100, device="cpu",
+                    text_uncond=None, guidance=1.0, image_guidance=1.0,
+                    generator=None):
         """Deterministic (eta=0) DDIM sampler, `steps` << self.timesteps.
 
         `steps` trades quality for the seconds-per-edit budget on a CPU/MPS
@@ -37,14 +39,51 @@ class DiffusionSchedule:
         regardless of prompt; 100 steps on the SAME checkpoint revealed real
         structure and color the 20-step version was hiding. Don't judge
         output quality below ~50.
+
+        Classifier-free guidance (added 2026-07-27). Sampling the model's raw
+        prediction (guidance=1.0, everything before this change) is why edits
+        barely showed up: with `before` concatenated on the channel axis, just
+        copying the input is always the cheapest way to lower the MSE, so the
+        text signal stays weak unless it's explicitly amplified at sampling
+        time. InstructPix2Pix uses the two-scale form implemented here —
+
+            e = e_uncond
+                + image_guidance * (e_image - e_uncond)
+                + guidance       * (e_full  - e_image)
+
+        where e_full conditions on both `before` and the prompt, e_image drops
+        the prompt (null text), and e_uncond drops both (`before` zeroed too).
+        IP2P's own defaults are guidance~7.5 / image_guidance~1.5.
+
+        `text_uncond` is the null-text embedding (encode [""]); pass it to turn
+        guidance on. Until train/train.py trains with conditioning dropout the
+        null branches are extrapolation — the empty prompt is still a valid
+        CLIP embedding, but a zeroed `before` is off-distribution, so a plain
+        text-only run (image_guidance=1.0) is the trustworthy measurement.
         """
         b = before.shape[0]
         seq = torch.linspace(self.timesteps - 1, 0, steps, dtype=torch.long, device=device)
-        x = torch.randn_like(before)
+        x = torch.randn(before.shape, device=device, dtype=before.dtype, generator=generator)
         acp = self.alphas_cumprod.to(device)
+        do_cfg = text_uncond is not None and (guidance != 1.0 or image_guidance != 1.0)
+        zeros_before = torch.zeros_like(before) if do_cfg and image_guidance != 1.0 else None
         for i, t in enumerate(seq):
             t_batch = t.repeat(b)
-            pred_noise = model(torch.cat([x, before], dim=1), t_batch, text_emb)
+            if do_cfg:
+                e_full = model(torch.cat([x, before], dim=1), t_batch, text_emb)
+                e_image = model(torch.cat([x, before], dim=1), t_batch, text_uncond)
+                if zeros_before is None:
+                    # Text-only guidance: no unconditional (zeroed-image)
+                    # branch, so the formula collapses to the familiar
+                    # single-scale one and costs 2 passes instead of 3.
+                    pred_noise = e_image + guidance * (e_full - e_image)
+                else:
+                    e_uncond = model(torch.cat([x, zeros_before], dim=1), t_batch, text_uncond)
+                    pred_noise = (e_uncond
+                                  + image_guidance * (e_image - e_uncond)
+                                  + guidance * (e_full - e_image))
+            else:
+                pred_noise = model(torch.cat([x, before], dim=1), t_batch, text_emb)
             a_t = acp[t]
             x0_pred = ((x - (1 - a_t).sqrt() * pred_noise) / a_t.sqrt()).clamp(-1, 1)
             if i == len(seq) - 1:
