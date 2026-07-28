@@ -96,6 +96,103 @@ TYPE_NAMES = ["null"] + SYNTHETIC_TYPES + REAL_TYPES
 N_TYPES = len(TYPE_NAMES)
 TYPE_ID = {name: i for i, name in enumerate(TYPE_NAMES)}
 
+# --- v4: AnyEdit taxonomy -----------------------------------------------------
+#
+# The IP2P types above are kept in the list even though the new corpus does not
+# feed them. Their POSITIONS are load-bearing: train/train.py grows the edit-type
+# embedding table on resume by copying old rows into a larger one, which is only
+# correct if existing ids keep their meaning. Removing them would shift every
+# later index and silently re-attach learned filter behaviour to the wrong type.
+# They simply never get sampled. New types are APPENDED, never inserted.
+
+# tune_transfer instructions are formulaic ("change the weather to snow", "make
+# the season autumn"), so the target word alone identifies the transformation.
+# Synonyms are merged: snow/snowy is one edit, not two, and splitting them would
+# halve the data for no gain. Counts measured over 60000 tune_transfer pairs.
+TUNE_RULES = [
+    ("season_winter", ["winter"]),                          # 12600
+    ("weather_snow", ["snow", "snowy"]),                    #  8452
+    ("season_autumn", ["autumn", "fall"]),                  #  7802
+    ("time_night", ["night", "midnight", "nighttime"]),     #  6382
+    ("time_evening", ["evening", "dusk", "sunset"]),        #  5512
+    ("weather_storm", ["storm", "stormy", "thunderstorm"]), #  4641
+    ("weather_fog", ["fog", "foggy", "mist", "misty"]),     #  4108
+    ("season_summer", ["summer"]),                          #  2384
+]
+
+# Whole AnyEdit types used as-is. `replace` is deliberately excluded: "replace X
+# with Y" names no single transformation, exactly like the IP2P `replace_with`
+# bucket that taught the previous model to ignore conditioning.
+ANYEDIT_WHOLE = ["style_change", "background_change"]
+
+# Top 30 objects by frequency across 270000 AnyEdit `add` pairs, all >= 1779
+# examples. In InstructPix2Pix the best-represented object had 351 and "hat" had
+# 109; here hat has 1849 and sits at rank 27.
+ADD_OBJECTS = [
+    "person",           # 9764
+    "bouquet",          # 7532
+    "ball",             # 7199
+    "cup",              # 6947
+    "pair",             # 6423
+    "balloon",          # 4879
+    "vase",             # 4835
+    "book",             # 4636
+    "sailboat",         # 4325
+    "people",           # 4182
+    "basket",           # 3942
+    "seagull",          # 3735
+    "cat",              # 3709
+    "glass",            # 3514
+    "dog",              # 3443
+    "guitar",           # 3244
+    "butterfly",        # 3192
+    "group",            # 3145
+    "crowd",            # 3090
+    "bear",             # 2866
+    "slice",            # 2775
+    "fish",             # 2207
+    "cake",             # 2184
+    "birds",            # 2050
+    "bird",             # 1982
+    "seagulls",         # 1968
+    "hat",              # 1849
+    "shining",          # 1793
+    "butterflies",      # 1788
+    "tree",             # 1779
+]
+
+SEMANTIC_TYPES = [name for name, _ in TUNE_RULES] + ANYEDIT_WHOLE
+ADD_TYPES = [f"add_{o}" for o in ADD_OBJECTS]
+
+TYPE_NAMES = TYPE_NAMES + SEMANTIC_TYPES + ADD_TYPES
+N_TYPES = len(TYPE_NAMES)
+TYPE_ID = {name: i for i, name in enumerate(TYPE_NAMES)}
+_TUNE_LOOKUP = {w: name for name, words in TUNE_RULES for w in words}
+_ADD_SET = set(ADD_OBJECTS)
+
+
+def classify_anyedit(anyedit_type, instruction):
+    """(AnyEdit edit_type, instruction) -> our type id, or None to drop the row.
+
+    Dropping is the default for anything not confidently nameable — the whole
+    point of this taxonomy is that every type means one transformation.
+    """
+    if anyedit_type == "add":
+        obj = add_object(instruction)
+        if obj in _ADD_SET:
+            return TYPE_ID[f"add_{obj}"]
+        return None
+    if anyedit_type == "tune_transfer":
+        words = [w for w in re.split(r"[^a-z]+", (instruction or "").lower()) if w]
+        for w in reversed(words):
+            if w in _TUNE_LOOKUP:
+                return TYPE_ID[_TUNE_LOOKUP[w]]
+        return None
+    if anyedit_type in ANYEDIT_WHOLE:
+        return TYPE_ID[anyedit_type]
+    return None
+
+
 
 # Boundary words that end the object phrase in an AnyEdit `add` instruction.
 # Real examples: "add a fresh fruit bowl ON the table", "add a big red hat ON the

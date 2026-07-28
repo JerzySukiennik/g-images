@@ -49,105 +49,112 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from model.unet import UNet
 from model.scheduler import DiffusionSchedule
 from data.edit_types import (NULL_TYPE, N_TYPES, SYNTHETIC_TYPES, TYPE_ID,
-                              TYPE_NAMES, real_index_by_type)
+                              TYPE_NAMES, classify_anyedit)
 from data.synthetic_edits import SYNTHETIC
 
 
 class PairDataset(Dataset):
-    """Mixes two supervision sources under one balanced type distribution.
+    """Mixes synthetic and AnyEdit supervision across several prep shards.
 
-    Synthetic types apply an exact function (data/synthetic_edits.py) to a real
-    `before` image, so every one of the 60k images is a valid pair for every such
-    type — effectively unlimited, perfectly consistent data. Real types read the
-    scraped `after` image for pairs whose prompt named that transformation.
+    Data now arrives as several independent prep-notebook outputs (five, for
+    400000 pairs), each with its own images binary and sidecars, because one
+    Kaggle notebook may not write 40 GB. They are concatenated logically here:
+    an item is (shard, row), and nothing downstream needs to know.
 
-    Types are sampled UNIFORMLY, not in proportion to available data. Without
-    that, `painting` (6290 real pairs) would outvote `sunset_sunrise` (585) more
-    than tenfold, and the synthetic types — which can supply a pair for every
-    image — would swamp everything. Uniform sampling is why the rare-but-coherent
-    types are trainable at all.
+    Two supervision sources, as before:
+      - synthetic types apply an exact function (data/synthetic_edits.py) to any
+        `before` image from any shard, so their data is unlimited and perfect;
+      - AnyEdit types read the scraped `after` image for rows whose (edit_type,
+        instruction) pair names one transformation, per classify_anyedit.
 
-    Training draws at random and ignores the index (the epoch is a formality when
-    one source is unbounded); validation walks a fixed deterministic list so the
-    number means the same thing every time it is printed.
+    Types are sampled UNIFORMLY. With `add_person` at 9764 pairs and `add_hat` at
+    1849, proportional sampling would bury the rarer objects five to one; uniform
+    sampling is why rare-but-coherent types are learnable at all, and it is what
+    made the filters work.
     """
 
-    def __init__(self, data_prefix, split="train", flip=False, val_pairs=8,
+    def __init__(self, data_prefixes, split="train", flip=False, val_pairs=4,
                  nominal_len=100_000):
-        with open(f"{data_prefix}_meta.json") as f:
-            meta = json.load(f)
-        self.res = meta["res"]
-        n, val_n = meta["n"], meta["val_n"]
-        self.images = np.memmap(f"{data_prefix}_images.bin", dtype=np.uint8, mode="r",
-                                 shape=(n, 2, 3, self.res, self.res))
-        self.n = n
         self.split = split
         self.flip = flip and split == "train"
+        self.shards = []
+        self.by_type = {}          # type_id -> [(shard, row)]
+        self.image_pool = []       # (shard, row) usable as a synthetic source
 
-        with open(f"{data_prefix}_prompts.json") as f:
-            prompts = json.load(f)
-        by_type = real_index_by_type(prompts)
+        for si, prefix in enumerate(data_prefixes):
+            with open(f"{prefix}_meta.json") as f:
+                meta = json.load(f)
+            n, val_n, res = meta["n"], meta.get("val_n", 0), meta["res"]
+            images = np.memmap(f"{prefix}_images.bin", dtype=np.uint8, mode="r",
+                                shape=(n, 2, 3, res, res))
+            self.shards.append(images)
+            self.res = res
 
-        # Hold the tail out of training entirely, for both sources.
-        train_cut = n - val_n
-        self.image_pool = (list(range(train_cut)) if split == "train"
-                           else list(range(train_cut, n)))
-        self.real_by_type = {
-            t: [i for i in idxs if (i < train_cut) == (split == "train")]
-            for t, idxs in by_type.items()
-        }
-        self.real_by_type = {t: v for t, v in self.real_by_type.items() if v}
+            with open(f"{prefix}_prompts.json") as f:
+                prompts = json.load(f)
+            types_path = f"{prefix}_types.json"
+            # Shards built by data/fetch_anyedit.py carry the corpus's own
+            # edit_type; the older IP2P prep had none, and those rows can still
+            # serve as synthetic sources even though no semantic type claims them.
+            raw_types = json.load(open(types_path)) if os.path.exists(types_path) else None
+
+            train_cut = n - val_n
+            for i in range(n):
+                in_train = i < train_cut
+                if in_train != (split == "train"):
+                    continue
+                self.image_pool.append((si, i))
+                if raw_types is None:
+                    continue
+                t = classify_anyedit(raw_types[i], prompts[i] if i < len(prompts) else "")
+                if t is not None:
+                    self.by_type.setdefault(t, []).append((si, i))
 
         self.synth_ids = [TYPE_ID[name] for name in SYNTHETIC_TYPES]
         self.synth_fn = {TYPE_ID[name]: SYNTHETIC[name] for name in SYNTHETIC_TYPES}
-        self.sampleable = self.synth_ids + sorted(self.real_by_type)
+        # A type with too few rows cannot teach a transformation and would just be
+        # memorized, so it is excluded rather than trained badly.
+        self.by_type = {t: v for t, v in self.by_type.items() if len(v) >= 50}
+        self.sampleable = self.synth_ids + sorted(self.by_type)
 
         if split == "train":
-            counts = ", ".join(f"{TYPE_NAMES[t]}={len(v)}"
-                               for t, v in sorted(self.real_by_type.items()))
+            print(f"{len(self.shards)} shards, {len(self.image_pool)} images in split")
             print(f"{len(self.synth_ids)} synthetic types (unlimited pairs each)")
-            print(f"{len(self.real_by_type)} real types: {counts}")
-            print(f"sampling types uniformly over {len(self.sampleable)} of them")
+            print(f"{len(self.by_type)} AnyEdit types; sampling uniformly over "
+                  f"{len(self.sampleable)} types total")
+            rare = sorted(self.by_type.items(), key=lambda kv: len(kv[1]))[:5]
+            print("smallest: " + ", ".join(f"{TYPE_NAMES[t]}={len(v)}" for t, v in rare))
 
-        # Deterministic validation list: every sampleable type, in order, repeated
-        # until val_pairs*len(types) examples exist.
         self.val_items = []
         if split != "train":
             for k in range(val_pairs):
                 for t in self.sampleable:
-                    pool = self.real_by_type.get(t, self.image_pool)
-                    self.val_items.append((t, pool[k % len(pool)]))
-
+                    pool = self.by_type.get(t) or self.image_pool
+                    if pool:
+                        self.val_items.append((t, pool[k % len(pool)]))
         self.nominal_len = nominal_len if split == "train" else len(self.val_items)
 
     def __len__(self):
         return self.nominal_len
 
-    def _load(self, j, which):
-        arr = self.images[j, which].copy()
-        return torch.from_numpy(arr).float() / 127.5 - 1.0
-
-    def _build(self, type_id, j):
-        before = self._load(j, 0)
-        if type_id in self.synth_fn:
-            after = self.synth_fn[type_id](before)
-        else:
-            after = self._load(j, 1)
-        return before, after
+    def _load(self, ref, which):
+        si, i = ref
+        return torch.from_numpy(self.shards[si][i, which].copy()).float() / 127.5 - 1.0
 
     def __getitem__(self, i):
         if self.split == "train":
             type_id = random.choice(self.sampleable)
-            pool = self.real_by_type.get(type_id, self.image_pool)
-            j = random.choice(pool)
+            pool = self.by_type.get(type_id) or self.image_pool
+            ref = random.choice(pool)
         else:
-            type_id, j = self.val_items[i]
+            type_id, ref = self.val_items[i]
 
-        before, after = self._build(type_id, j)
+        before = self._load(ref, 0)
+        after = (self.synth_fn[type_id](before) if type_id in self.synth_fn
+                 else self._load(ref, 1))
 
-        # Horizontal flip is safe for every type kept here: none of them name a
-        # side, and the synthetic functions are all per-pixel or symmetric, so
-        # flipping both images preserves the relationship exactly.
+        # Safe for every surviving type: none names a side, and the synthetic
+        # functions are per-pixel or symmetric.
         if self.flip and random.random() < 0.5:
             before = torch.flip(before, dims=[-1])
             after = torch.flip(after, dims=[-1])
@@ -392,7 +399,9 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--data", required=True, help="prefix used by fetch_dataset.py's --out-prefix")
+    p.add_argument("--data", required=True, nargs="+",
+                    help="one or more dataset prefixes; several prep shards are "
+                         "concatenated logically (one notebook cannot write 40 GB)")
     p.add_argument("--out", default="./run")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--grad-accum", type=int, default=1)

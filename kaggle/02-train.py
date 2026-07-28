@@ -140,9 +140,13 @@ subprocess.run([sys.executable, "-m", "pip", "install", "-q", "transformers"], c
 # Kaggle's input mount depth isn't fixed (seen both /kaggle/input/<slug>/ and
 # /kaggle/input/datasets/<owner>/<slug>/ in practice) — recursive search finds
 # it regardless.
-hits = glob.glob("/kaggle/input/**/gedit_images.bin", recursive=True)
+# Several prep notebooks are attached, each holding one shard of the corpus —
+# one Kaggle notebook cannot write the 40 GB the full set needs. Every
+# gedit_images.bin found becomes a dataset prefix, and train/train.py
+# concatenates them logically.
+hits = sorted(glob.glob("/kaggle/input/**/gedit_images.bin", recursive=True))
 if not hits:
-    print("gedit_images.bin not found. /kaggle/input contains:")
+    print("no gedit_images.bin found. /kaggle/input contains:")
     for root, dirs, files in os.walk("/kaggle/input"):
         depth = root.count("/") - 2
         if depth > 3:
@@ -150,10 +154,12 @@ if not hits:
         print("  " * depth + os.path.basename(root) + "/")
         for f in sorted(files)[:12]:
             print("  " * (depth + 1) + f)
-    raise SystemExit("attach the gedit-data dataset, or wait for it to finish building")
+    raise SystemExit("attach the gedit-anyedit-* notebook outputs")
 
-data_prefix = hits[0].replace("_images.bin", "")
-print(f"data: {data_prefix}")
+data_prefixes = [h.replace("_images.bin", "") for h in hits]
+print(f"{len(data_prefixes)} data shards:")
+for d in data_prefixes:
+    print("   ", d)
 
 os.makedirs(OUT, exist_ok=True)
 hits_ckpt = sorted(glob.glob("/kaggle/input/**/ckpt.pt", recursive=True))
@@ -175,7 +181,7 @@ STEPS = min(TOTAL_STEPS, start_step + SESSION_STEPS)
 print(f"session: step {start_step} -> {STEPS} (global target {TOTAL_STEPS})")
 
 cmd = [sys.executable, "train/train.py",
-       "--data", data_prefix,
+       "--data", *data_prefixes,
        "--out", OUT,
        "--batch-size", str(BATCH),
        "--grad-accum", str(ACCUM),
