@@ -244,7 +244,25 @@ def main(args):
         # v2 checkpoints (up to step 94200) are still lying around in Kaggle
         # datasets, so name the problem explicitly.
         want = raw_model.state_dict()
-        got = ckpt["model"]
+        got = dict(ckpt["model"])
+
+        # Growing the taxonomy changes only the embedding table's row count.
+        # Every other weight is untouched, so copying the old rows into the
+        # larger table carries over everything the model already learned — worth
+        # doing, since the filter types took ~40000 steps to get right and the
+        # new rows are additions, not replacements. Relies on new types being
+        # APPENDED to TYPE_NAMES: reordering would silently attach learned
+        # behaviour to the wrong type, so verify that before trusting this path.
+        key = "type_tokens.emb.weight"
+        if key in got and key in want and got[key].shape != want[key].shape:
+            old_rows, new_rows = got[key].shape[0], want[key].shape[0]
+            if got[key].shape[1:] == want[key].shape[1:] and new_rows > old_rows:
+                grown = want[key].clone()
+                grown[:old_rows] = got[key]
+                got[key] = grown
+                print(f"grew the edit-type table {old_rows} -> {new_rows} rows, "
+                      f"keeping the learned ones (new rows start from init)")
+
         bad = [k for k in want if k not in got or want[k].shape != got[k].shape]
         if bad:
             raise SystemExit(

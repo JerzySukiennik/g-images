@@ -51,6 +51,8 @@ Type 0 is `null`: the trained unconditional branch used by conditioning dropout
 and as the guidance baseline.
 """
 
+import re
+
 NULL_TYPE = 0
 
 # Exact image functions — see data/synthetic_edits.py for the implementations.
@@ -93,6 +95,38 @@ REAL_TYPES = [name for name, _ in REAL_RULES]
 TYPE_NAMES = ["null"] + SYNTHETIC_TYPES + REAL_TYPES
 N_TYPES = len(TYPE_NAMES)
 TYPE_ID = {name: i for i, name in enumerate(TYPE_NAMES)}
+
+
+# Boundary words that end the object phrase in an AnyEdit `add` instruction.
+# Real examples: "add a fresh fruit bowl ON the table", "add a big red hat ON the
+# horse", "add a person TAKING a bath", "add a cup OF coffee in his hand". Without
+# cutting here, the head noun comes out as "table"/"horse"/"bath"/"hand" — the
+# place the object went, not the object. A first attempt did exactly that and
+# produced a histogram of "of", "taking", "eating".
+_ADD_BOUNDARY = re.compile(
+    r"\b(?:on|in|at|next|between|near|under|with|behind|over|of|to|from|beside|"
+    r"against|around|taking|holding|standing|eating|lying|preparing|watching|"
+    r"sitting|walking|playing|wearing|hanging|floating|resting|leaning)\b")
+_ADD_HEAD = re.compile(r"^\s*(?:add|include|put|place|insert)\s+"
+                        r"(?:a|an|the|some)?\s*(.+)$", re.I)
+
+
+def add_object(instruction):
+    """AnyEdit `add` instruction -> head noun of the added object, or None.
+
+    "add a big red hat on the horse" -> "hat"
+    "include a beach umbrella"       -> "umbrella"
+    "add a cup of coffee in his hand"-> "cup"
+    """
+    m = _ADD_HEAD.match(instruction or "")
+    if not m:
+        return None
+    phrase = m.group(1).lower()
+    cut = _ADD_BOUNDARY.search(phrase)
+    if cut:
+        phrase = phrase[:cut.start()]
+    words = [w for w in re.split(r"[^a-z]+", phrase) if w]
+    return words[-1] if words else None
 
 
 def classify_real(prompt):
