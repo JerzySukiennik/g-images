@@ -105,8 +105,26 @@ TYPE_ID = {name: i for i, name in enumerate(TYPE_NAMES)}
 # produced a histogram of "of", "taking", "eating".
 _ADD_BOUNDARY = re.compile(
     r"\b(?:on|in|at|next|between|near|under|with|behind|over|of|to|from|beside|"
-    r"against|around|taking|holding|standing|eating|lying|preparing|watching|"
-    r"sitting|walking|playing|wearing|hanging|floating|resting|leaning)\b")
+    r"against|around|inside|outside|beneath|above|below|along|across|onto|into|"
+    r"nearby|overhead|out|off|up|down|away|there|here|"
+    r"taking|holding|standing|eating|lying|preparing|watching|sitting|walking|"
+    r"playing|wearing|hanging|floating|resting|leaning|flying|perched|waving|"
+    r"waiting|swimming|running|jumping|reading|riding|carrying|looking|smiling|"
+    r"tied|placed|parked|seated|attached|surrounded|covered|filled)\b")
+
+# Words that are never the object itself. A first pass produced "nearby" (2568),
+# "overhead" (1772) and "flying" (1063) as top "objects" — all locative or
+# participial tails that survived because the boundary list was too short. Kept
+# as a second net so a missed boundary word degrades to a dropped row rather than
+# to a bogus type with thousands of contradictory examples.
+_NOT_AN_OBJECT = {
+    "nearby", "overhead", "out", "above", "below", "here", "there", "away",
+    "flying", "perched", "waving", "waiting", "swimming", "running", "tied",
+    "placed", "parked", "seated", "attached", "left", "right", "top", "bottom",
+    "side", "front", "back", "middle", "corner", "area", "background",
+    "foreground", "scene", "image", "picture", "photo", "one", "two", "some",
+    "more", "another", "other", "same", "new", "few", "several", "many",
+}
 _ADD_HEAD = re.compile(r"^\s*(?:add|include|put|place|insert)\s+"
                         r"(?:a|an|the|some)?\s*(.+)$", re.I)
 
@@ -126,6 +144,8 @@ def add_object(instruction):
     if cut:
         phrase = phrase[:cut.start()]
     words = [w for w in re.split(r"[^a-z]+", phrase) if w]
+    while words and words[-1] in _NOT_AN_OBJECT:
+        words.pop()
     return words[-1] if words else None
 
 

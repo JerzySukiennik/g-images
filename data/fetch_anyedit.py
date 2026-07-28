@@ -55,20 +55,37 @@ SHARDMAP = os.path.join(HERE, "anyedit_shardmap.json")
 REPO = "Bin1117/AnyEdit"
 
 
-def pick_shards(wanted, quota):
-    """Choose shards covering `wanted` types, up to `quota` rows per type.
+def pick_shards(wanted, quota, skip_shards=0):
+    """Choose shards covering `wanted` types, up to `quota` rows per type, after
+    skipping `skip[type]` rows of that type.
 
     Returns [(shard_index, {types})]. Shards are homogeneous or nearly so, so
     this is mostly "take shards of type X until the quota for X is met".
+
+    `skip_shards` is what makes several prep notebooks give DISJOINT data.
+    Without it every notebook starts at the first shard of each type and
+    re-downloads identical rows: three kernels once produced 150000 `add` pairs of
+    which only 60000 were unique, confirmed by comparing their instruction lists
+    (100% of the smaller set appeared in the larger). Notebook k passes
+    skip_shards = k * (shards the previous notebooks consumed).
     """
     with open(SHARDMAP) as f:
         smap = json.load(f)
     taken, got = [], {t: 0 for t in wanted}
+    seen_shards = 0
     for idx in sorted(smap, key=int):
-        info = smap[idx]
-        types = info.get("types") or {}
-        useful = {t: n for t, n in types.items() if t in wanted and got[t] < quota[t]}
+        types = (smap[idx].get("types") or {})
+        useful = {t: n for t, n in types.items()
+                  if t in wanted and got[t] < quota[t]}
         if not useful:
+            continue
+        # Counted in SHARDS, not rows. A row-based skip does not land on shard
+        # boundaries — a quota of 60000 consumes ceil(60000/6489) = 10 shards but
+        # only writes 60000 rows, so the next notebook skipping "60000 rows"
+        # started inside a shard the previous one had already taken. Whole shards
+        # make the slices exactly disjoint.
+        seen_shards += 1
+        if seen_shards <= skip_shards:
             continue
         taken.append((int(idx), set(useful)))
         for t, n in useful.items():
@@ -93,9 +110,10 @@ def build(args):
     import pyarrow.parquet as pq
     from huggingface_hub import hf_hub_download
 
-    wanted = dict(kv.split("=") for kv in args.want)
-    quota = {t: int(n) for t, n in wanted.items()}
-    shards, projected = pick_shards(set(quota), quota)
+    quota = {t: int(n) for t, n in (kv.split("=") for kv in args.want)}
+    shards, projected = pick_shards(set(quota), quota, args.skip_shards)
+    if args.skip_shards:
+        print(f"skipping the first {args.skip_shards} useful shards")
     print(f"{len(shards)} shards cover the quota; projected rows per type: {projected}",
           flush=True)
 
@@ -213,6 +231,9 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--want", nargs="+", required=True,
                     help="TYPE=COUNT pairs, e.g. add=150000 tune_transfer=150000")
+    p.add_argument("--skip-shards", type=int, default=0,
+                    help="skip this many otherwise-useful shards first, so parallel "
+                         "prep notebooks fetch DISJOINT slices instead of identical rows")
     p.add_argument("--res", type=int, default=128)
     p.add_argument("--val-n", type=int, default=2000)
     p.add_argument("--out-prefix", default="./gedit")

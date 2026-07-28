@@ -18,16 +18,29 @@ RES = 128
 
 SHARD = int(os.environ.get("GEDIT_SHARD", "0"))
 
-# Per-shard quotas. `add` gets the largest allocation because object addition is
-# the capability this whole dataset switch exists to enable — it had 109 usable
-# examples in InstructPix2Pix and has ~414000 here.
+# Per-shard quotas, each with the number of already-consumed shards to skip.
+#
+# The skip is not optional bookkeeping: without it every notebook starts at the
+# first shard of a type and downloads the SAME rows. The first attempt did
+# exactly that — three notebooks produced 150000 `add` pairs of which only 60000
+# were unique, caught by comparing their instruction lists (100% of the smaller
+# set appeared in the larger). Each quota of 60000 consumes 10 shards, so the
+# offsets below step by 10.
+#
+# `add` dominates the allocation because object addition is the capability this
+# dataset switch exists to enable. Measured on the 90000 add pairs fetched so far,
+# "hat" appears 580 times, which extrapolates to ~2500 across the full 393629 —
+# comfortably trainable, where InstructPix2Pix offered 109.
 QUOTAS = [
-    ["add=60000", "tune_transfer=60000"],
-    ["add=60000", "tune_transfer=60000"],
-    ["add=30000", "style_change=25000", "background_change=25000", "replace=20000"],
+    (["add=60000", "tune_transfer=60000"], 0),      # done
+    (["add=60000"], 10),
+    (["add=30000", "style_change=25000",
+      "background_change=25000", "replace=20000"], 0),  # done (non-add parts)
+    (["add=60000"], 20),
+    (["add=60000"], 30),
 ]
-want = QUOTAS[SHARD]
-print(f"shard {SHARD}: {want}", flush=True)
+want, skip_shards = QUOTAS[SHARD]
+print(f"shard {SHARD}: {want}, skipping {skip_shards} shards", flush=True)
 
 if os.path.exists(f"{WORK}/gedit"):
     subprocess.run(["git", "-C", f"{WORK}/gedit", "pull", "--ff-only"], check=True)
@@ -46,6 +59,7 @@ except Exception as e:
 
 subprocess.run([sys.executable, "data/fetch_anyedit.py",
                 "--res", str(RES), "--out-prefix", f"{WORK}/gedit",
+                "--skip-shards", str(skip_shards),
                 "--want"] + want, check=True)
 
 print(f"\ndone — shard {SHARD}; attach this notebook's output to the training kernel")
