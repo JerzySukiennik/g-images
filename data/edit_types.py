@@ -129,36 +129,36 @@ ANYEDIT_WHOLE = ["style_change", "background_change"]
 # examples. In InstructPix2Pix the best-represented object had 351 and "hat" had
 # 109; here hat has 1849 and sits at rank 27.
 ADD_OBJECTS = [
-    "person",           # 9764
-    "bouquet",          # 7532
-    "ball",             # 7199
-    "cup",              # 6947
-    "pair",             # 6423
-    "balloon",          # 4879
-    "vase",             # 4835
-    "book",             # 4636
-    "sailboat",         # 4325
-    "people",           # 4182
-    "basket",           # 3942
-    "seagull",          # 3735
-    "cat",              # 3709
-    "glass",            # 3514
-    "dog",              # 3443
-    "guitar",           # 3244
-    "butterfly",        # 3192
-    "group",            # 3145
-    "crowd",            # 3090
-    "bear",             # 2866
-    "slice",            # 2775
-    "fish",             # 2207
-    "cake",             # 2184
-    "birds",            # 2050
-    "bird",             # 1982
-    "seagulls",         # 1968
-    "hat",              # 1849
-    "shining",          # 1793
-    "butterflies",      # 1788
-    "tree",             # 1779
+    "ball",           # 8021
+    "bouquet",        # 7534
+    "cup",            # 6975
+    "balloon",        # 6478
+    "seagull",        # 5703
+    "butterfly",      # 4980
+    "book",           # 4856
+    "vase",           # 4835
+    "sailboat",       # 4746
+    "bird",           # 4032
+    "basket",         # 3962
+    "glass",          # 3723
+    "cat",            # 3717
+    "dog",            # 3468
+    "guitar",         # 3248
+    "slice",          # 3075
+    "bear",           # 2875
+    "flower",         # 2436
+    "tree",           # 2272
+    "candle",         # 2266
+    "fish",           # 2207
+    "cake",           # 2184
+    "hat",            # 1877
+    "banner",         # 1565
+    "performer",      # 1409
+    "chef",           # 1382
+    "bookshelf",      # 1342
+    "surfboard",      # 1298
+    "farmer",         # 1237
+    "ribbon",         # 1168
 ]
 
 SEMANTIC_TYPES = [name for name, _ in TUNE_RULES] + ANYEDIT_WHOLE
@@ -221,6 +221,8 @@ _NOT_AN_OBJECT = {
     "side", "front", "back", "middle", "corner", "area", "background",
     "foreground", "scene", "image", "picture", "photo", "one", "two", "some",
     "more", "another", "other", "same", "new", "few", "several", "many",
+    "shining", "hovering", "standing", "sitting", "large", "small", "big",
+    "little", "sky",
 }
 _ADD_HEAD = re.compile(r"^\s*(?:add|include|put|place|insert)\s+"
                         r"(?:a|an|the|some)?\s*(.+)$", re.I)
@@ -243,7 +245,19 @@ def add_object(instruction):
     words = [w for w in re.split(r"[^a-z]+", phrase) if w]
     while words and words[-1] in _NOT_AN_OBJECT:
         words.pop()
-    return words[-1] if words else None
+    if not words:
+        return None
+    # Singular and plural name the same transformation. Left unmerged, the first
+    # taxonomy had both add_seagull (3735) and add_seagulls (1919) as separate
+    # types, splitting one edit's data across two embedding rows for no reason.
+    w = words[-1]
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith(("ses", "xes", "hes")):
+        return w[:-2]
+    if w.endswith("s") and not w.endswith("ss") and len(w) > 3:
+        return w[:-1]
+    return w
 
 
 def classify_real(prompt):

@@ -280,6 +280,24 @@ def main(args):
                 f"checkpoint dataset from the kernel's inputs.")
         raw_model.load_state_dict(got)
         opt.load_state_dict(ckpt["opt"])
+
+        # Growing the embedding table is only half the job: AdamW keeps two
+        # momentum tensors PER PARAMETER, and the ones just restored are still
+        # shaped for the old row count. Without this the first opt.step() dies
+        # inside _multi_tensor_adam on a size mismatch — which is exactly how the
+        # first v4 run failed, after everything else had already gone right.
+        # Padding with zeros rather than dropping the state keeps the momentum
+        # learned for the existing types; new rows simply start at rest.
+        emb = raw_model.type_tokens.emb.weight
+        st = opt.state.get(emb)
+        if st is not None:
+            for key in ("exp_avg", "exp_avg_sq"):
+                v = st.get(key)
+                if v is not None and v.shape != emb.shape:
+                    grown_state = torch.zeros_like(emb)
+                    grown_state[:v.shape[0]] = v.to(grown_state.dtype)
+                    st[key] = grown_state
+                    print(f"grew optimizer {key} {tuple(v.shape)} -> {tuple(emb.shape)}")
         step = ckpt["step"]
         if ema is not None:
             if "ema" in ckpt:
