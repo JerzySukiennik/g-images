@@ -27,7 +27,25 @@ import sys
 
 REPO = "https://github.com/JerzySukiennik/gedit.git"
 WORK = "/kaggle/working"
-N, RES = 60000, 128
+RES = 128
+
+# 2026-07-28: scaling from 60000 pairs to the whole corpus. Measured, not
+# assumed — timbrooks/instructpix2pix-clip-filtered reports 313010 examples, so
+# "300-500k" tops out at taking all of it, a 5.2x increase.
+#
+# It has to be sharded: 313010 pairs at 128px is ~31 GB of image binary, over
+# what a single Kaggle notebook may write to its output. Three shards of 105000
+# are ~10.3 GB each. The HF stream order is deterministic, so shard k taking rows
+# [k*SHARD_SIZE, ...) is disjoint and reproducible, and shard 0 reproduces the
+# first 60000 pairs we already trained on.
+#
+# SHARD comes from the environment so the three bootstrap kernels differ by one
+# line instead of duplicating this file three times.
+SHARD = int(os.environ.get("GEDIT_SHARD", "0"))
+SHARD_SIZE = 105000
+N = SHARD_SIZE
+SKIP = SHARD * SHARD_SIZE
+print(f"shard {SHARD}: rows {SKIP}..{SKIP + N} of 313010", flush=True)
 
 if os.path.exists(f"{WORK}/gedit"):
     # A stale checkout from an earlier attempt in this same session would
@@ -50,10 +68,10 @@ except Exception as e:
     print(f"no HF token ({type(e).__name__}) — downloading anonymously, slower")
 
 subprocess.run([sys.executable, "data/fetch_dataset.py",
-                "--n", str(N), "--res", str(RES),
+                "--n", str(N), "--res", str(RES), "--skip", str(SKIP),
                 "--out-prefix", f"{WORK}/gedit"], check=True)
 
-print("\ndone — save this notebook's output as a Dataset named 'gedit-data'")
+print(f"\ndone — shard {SHARD}; attach this notebook's output to the training kernel")
 for f in sorted(os.listdir(WORK)):
     p = f"{WORK}/{f}"
     if os.path.isfile(p):

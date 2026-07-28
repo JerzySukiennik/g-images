@@ -34,6 +34,14 @@ def build(args):
     from datasets import load_dataset
     ds = load_dataset("timbrooks/instructpix2pix-clip-filtered", split="train", streaming=True)
 
+    # --skip shards the corpus: the stream order is deterministic, so shard k
+    # taking rows [k*n, (k+1)*n) gives disjoint, reproducible slices. Needed
+    # because the full 313010 pairs at 128px are ~31 GB, over what one Kaggle
+    # notebook may write to its output.
+    if args.skip:
+        print(f"skipping the first {args.skip} rows...", flush=True)
+        ds = ds.skip(args.skip)
+
     prompts = []
     written = 0
     with open(images_path, "wb") as f_img:
@@ -62,25 +70,35 @@ def build(args):
 
     print(f"images done: {written} pairs, {os.path.getsize(images_path)/1e9:.2f} GB")
 
-    # --- text embeddings (frozen CLIP, see model/clip_encoder.py) -----------
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-    from model.clip_encoder import ClipTextEncoder
+    # --- text embeddings (frozen CLIP) --------------------------------------
+    # Off by default since v3: conditioning is a discrete edit type with its own
+    # learned tokens (data/edit_types.py), so nothing reads these any more. They
+    # were 3.9 GB per 60k pairs and a CLIP forward pass over every prompt — at
+    # the full 313010-pair scale that is ~20 GB and hours of CPU spent producing
+    # a file no code opens. --with-clip-text restores them for anyone comparing
+    # against the old text-conditioned model.
+    meta = {
+        "n": written,
+        "val_n": min(args.val_n, written // 10),
+        "res": args.res,
+        "prompts_sample": prompts[:20],
+    }
+    if args.with_clip_text:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from model.clip_encoder import ClipTextEncoder
 
-    encoder = ClipTextEncoder(device="cpu")
-    emb = encoder.encode(prompts, batch_size=args.clip_batch)  # [N, seq_len, embed_dim]
-    emb.numpy().astype(np.float32).tofile(text_path)
-    print(f"text embeddings done: {tuple(emb.shape)}, {os.path.getsize(text_path)/1e6:.1f} MB")
+        encoder = ClipTextEncoder(device="cpu")
+        emb = encoder.encode(prompts, batch_size=args.clip_batch)
+        emb.numpy().astype(np.float32).tofile(text_path)
+        print(f"text embeddings done: {tuple(emb.shape)}, "
+              f"{os.path.getsize(text_path)/1e6:.1f} MB")
+        meta.update(text_dim=encoder.embed_dim, seq_len=encoder.seq_len,
+                    clip_model=encoder.model.name_or_path)
+    else:
+        print("skipping CLIP text embeddings (not used since v3)")
 
     with open(meta_path, "w") as f:
-        json.dump({
-            "n": written,
-            "val_n": min(args.val_n, written // 10),
-            "res": args.res,
-            "text_dim": encoder.embed_dim,
-            "seq_len": encoder.seq_len,
-            "clip_model": encoder.model.name_or_path,
-            "prompts_sample": prompts[:20],
-        }, f, indent=2)
+        json.dump(meta, f, indent=2)
     print(f"wrote {meta_path}")
 
     # Full prompt list, index-aligned with the images/text binaries — lets
@@ -94,6 +112,10 @@ def build(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--n", type=int, default=20000)
+    p.add_argument("--skip", type=int, default=0,
+                    help="rows to skip before collecting; use k*n for shard k")
+    p.add_argument("--with-clip-text", action="store_true",
+                    help="also write the CLIP text embedding binary (unused since v3)")
     p.add_argument("--res", type=int, default=128)
     p.add_argument("--val-n", type=int, default=300)
     p.add_argument("--clip-batch", type=int, default=64)
