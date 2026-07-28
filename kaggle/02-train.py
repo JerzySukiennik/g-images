@@ -112,7 +112,21 @@ OUT = f"{WORK}/run"
 # intervals. The synthetic types should be learnable within a few thousand steps —
 # they are exact functions — so an early check is genuinely informative here,
 # unlike the semantic ones.
-BATCH, ACCUM, STEPS, WARMUP = 32, 1, 60000, 200
+# SESSION_STEPS caps how far ONE session runs, on top of the global TOTAL_STEPS
+# ceiling. Two runs now have died the same way: a normal pace of ~0.84s/step for
+# ~20000 steps, then a single 8409-second gap between two consecutive 20-step log
+# lines, then a kill. That gap is the process thrashing before it gets OOM-killed
+# — 2.3 hours of GPU quota spent computing nothing, on a quota shared with
+# G-Micro and G-Mini.
+#
+# The suspect is page-cache pressure from randomly reading a 9.8 GB memmap for
+# hours. Rather than chase that, end each session voluntarily while it is still
+# healthy: train/train.py exits cleanly at --max-steps, the checkpoint lands, and
+# the next session resumes. Costs one extra checkpoint upload, saves hours of
+# thrashing.
+BATCH, ACCUM, WARMUP = 32, 1, 200
+TOTAL_STEPS = 60000
+SESSION_STEPS = 18000
 LR_DECAY_STEPS = 60000
 TEXT_DROPOUT = 0.1
 
@@ -150,6 +164,15 @@ if hits_ckpt:
     print(f"resuming from {hits_ckpt[0]}")
 else:
     print("starting from scratch")
+
+# Read the resume point so this session's ceiling is start + SESSION_STEPS rather
+# than the global total — see the SESSION_STEPS comment above.
+start_step = 0
+if resume:
+    import torch
+    start_step = torch.load(f"{OUT}/ckpt.pt", map_location="cpu").get("step", 0)
+STEPS = min(TOTAL_STEPS, start_step + SESSION_STEPS)
+print(f"session: step {start_step} -> {STEPS} (global target {TOTAL_STEPS})")
 
 cmd = [sys.executable, "train/train.py",
        "--data", data_prefix,
