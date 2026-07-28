@@ -45,12 +45,18 @@ class DiffusionSchedule:
         self.prediction = prediction
         self.schedule = schedule
         if schedule == "cosine":
+            # Built on CPU in float64 and then moved: the cumulative product is
+            # sensitive enough near t=T to want the precision, and MPS has no
+            # float64 at all (this raised a TypeError on the Mac while CUDA
+            # silently accepted it — a divergence worth not having).
             s = 0.008
-            steps = torch.arange(timesteps + 1, device=device, dtype=torch.float64)
+            steps = torch.arange(timesteps + 1, dtype=torch.float64)
             f = torch.cos(((steps / timesteps + s) / (1 + s)) * math.pi / 2) ** 2
-            alphas_cumprod = (f / f[0])[1:].float()
-            betas = (1 - alphas_cumprod / torch.cat(
-                [torch.ones(1, device=device), alphas_cumprod[:-1]])).clamp(max=0.999)
+            acp64 = (f / f[0])[1:]
+            betas = (1 - acp64 / torch.cat([torch.ones(1, dtype=torch.float64),
+                                             acp64[:-1]])).clamp(max=0.999)
+            alphas_cumprod = acp64.float().to(device)
+            betas = betas.float().to(device)
         elif schedule == "linear":
             betas = torch.linspace(beta_start, beta_end, timesteps, device=device)
             alphas_cumprod = torch.cumprod(1.0 - betas, dim=0)
