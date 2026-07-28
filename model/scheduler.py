@@ -4,6 +4,8 @@ same reasoning as MicroG: understanding every layer matters as much as a
 working model (see SPEC.md).
 """
 
+import math
+
 import torch
 
 
@@ -19,15 +21,63 @@ def _quantile(flat, q):
 
 
 class DiffusionSchedule:
-    def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=2e-2, device="cpu"):
+    """schedule="cosine" and prediction="v" are the v3 defaults; the linear /
+    epsilon combination the earlier runs used is still selectable for comparison.
+
+    Why both changed, measured rather than assumed. On the step-94200 epsilon
+    model with the linear schedule, runtime/guidance_probe.py found the predicted
+    noise at t=999 had std 0.19 where the true noise has std 1.0 — a 4x
+    under-prediction at exactly the timestep DDIM sampling starts from, which is
+    why 91% of the first x0 estimate landed outside [-1,1]. At t=999 under a
+    linear schedule the input is essentially pure noise, so predicting it back is
+    nearly an identity map, and the model could not do it.
+
+    Cosine (Nichol & Dhariwal 2021) spends far less of the schedule in the
+    near-pure-noise regime, which is mostly wasted capacity at 128px, and
+    v-prediction (Salimans & Ho 2022) is well-conditioned across the whole range
+    instead of degenerating at the high-noise end the way epsilon-prediction
+    does. They are the modern default pairing for exactly this failure.
+    """
+
+    def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=2e-2,
+                 schedule="cosine", prediction="v", device="cpu"):
         self.timesteps = timesteps
-        betas = torch.linspace(beta_start, beta_end, timesteps, device=device)
-        alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        self.prediction = prediction
+        self.schedule = schedule
+        if schedule == "cosine":
+            s = 0.008
+            steps = torch.arange(timesteps + 1, device=device, dtype=torch.float64)
+            f = torch.cos(((steps / timesteps + s) / (1 + s)) * math.pi / 2) ** 2
+            alphas_cumprod = (f / f[0])[1:].float()
+            betas = (1 - alphas_cumprod / torch.cat(
+                [torch.ones(1, device=device), alphas_cumprod[:-1]])).clamp(max=0.999)
+        elif schedule == "linear":
+            betas = torch.linspace(beta_start, beta_end, timesteps, device=device)
+            alphas_cumprod = torch.cumprod(1.0 - betas, dim=0)
+        else:
+            raise ValueError(f"unknown schedule {schedule!r}")
         self.betas = betas
         self.alphas_cumprod = alphas_cumprod
         self.sqrt_alphas_cumprod = alphas_cumprod.sqrt()
         self.sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
+
+    def target(self, x0, noise, t):
+        """What the network is trained to output: the noise itself, or the
+        v-parameterization v = alpha_t * noise - sigma_t * x0."""
+        if self.prediction == "eps":
+            return noise
+        a = self.sqrt_alphas_cumprod[t].view(-1, 1, 1, 1)
+        s = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1)
+        return a * noise - s * x0
+
+    def to_eps(self, pred, x_t, t):
+        """Convert whatever the network predicted into a noise estimate, so the
+        sampler below stays written in one parameterization."""
+        if self.prediction == "eps":
+            return pred
+        a = self.sqrt_alphas_cumprod[t].view(-1, 1, 1, 1)
+        s = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1)
+        return s * x_t + a * pred
 
     def q_sample(self, x0, t, noise=None):
         """Forward process: x_t = sqrt(acp_t) * x0 + sqrt(1 - acp_t) * noise."""
@@ -82,8 +132,13 @@ class DiffusionSchedule:
         for i, t in enumerate(seq):
             t_batch = t.repeat(b)
             if do_cfg:
-                e_full = model(torch.cat([x, before], dim=1), t_batch, text_emb)
-                e_image = model(torch.cat([x, before], dim=1), t_batch, text_uncond)
+                # Guidance is applied in epsilon space regardless of what the
+                # network predicts, so the two parameterizations can't disagree
+                # about what "scaling the conditional difference" means.
+                e_full = self.to_eps(
+                    model(torch.cat([x, before], dim=1), t_batch, text_emb), x, t_batch)
+                e_image = self.to_eps(
+                    model(torch.cat([x, before], dim=1), t_batch, text_uncond), x, t_batch)
                 if zeros_before is None:
                     # Text-only guidance: no unconditional (zeroed-image)
                     # branch, so the formula collapses to the familiar

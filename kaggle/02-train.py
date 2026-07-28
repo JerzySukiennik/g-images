@@ -84,9 +84,37 @@ OUT = f"{WORK}/run"
 # STEPS 100000 lands exactly on LR_DECAY_STEPS, so the cosine decay finishes at
 # its floor rather than being cut off mid-slope. ~30000 steps at ~0.75s/step is
 # ~6.3h, inside the 12h session cap.
-BATCH, ACCUM, STEPS, WARMUP = 32, 1, 100000, 200
-LR_DECAY_STEPS = 100000
-TEXT_DROPOUT = 0.2
+# --- v3, 2026-07-28: from scratch, discrete edit types --------------------------
+# The 20% dropout run (to step 94200) settled it: cos(e_cond, e_null) = 1.000 at
+# every timestep, difference vector ~1-2% of signal. The model had learned to
+# ignore its text conditioning, so guidance had nothing to amplify and no amount
+# of dropout or steps was going to change that.
+#
+# kaggle/04-probe-types.py then explained why, by counting the real corpus:
+# "black and white" has 588 examples in 60000, sepia 182, "brighter" 3 — while 23%
+# of prompts fall in a `replace_with` catch-all ("make her a panda") that names no
+# single transformation. We had been grading the model all day on an edit worth 1%
+# of its data, and feeding it a third of a corpus of mutually contradictory
+# targets.
+#
+# v3 therefore: conditioning is a discrete edit type with its own learned tokens
+# (data/edit_types.py, model/unet.py's TypeTokens); 13 of the types are exact
+# image functions generated on the fly (data/synthetic_edits.py), giving unlimited
+# perfectly-consistent pairs for precisely the colour/tone edits the corpus lacked;
+# 10 semantic types keep their scraped pairs; types are sampled uniformly so the
+# rare ones are learnable; cosine schedule + v-prediction replace linear + epsilon,
+# which had the model predicting noise of std 0.19 where truth was 1.0 at the
+# timestep sampling starts from; and the U-Net gains a fourth level, moving the
+# bottleneck from 32x32 to 16x16.
+#
+# None of that is weight-compatible, so this run starts from zero and gedit-ckpt is
+# detached from the kernel's inputs. STEPS is a ceiling as always; check quality at
+# intervals. The synthetic types should be learnable within a few thousand steps —
+# they are exact functions — so an early check is genuinely informative here,
+# unlike the semantic ones.
+BATCH, ACCUM, STEPS, WARMUP = 32, 1, 60000, 200
+LR_DECAY_STEPS = 60000
+TEXT_DROPOUT = 0.1
 
 if os.path.exists(f"{WORK}/gedit"):
     subprocess.run(["git", "-C", f"{WORK}/gedit", "pull", "--ff-only"], check=True)

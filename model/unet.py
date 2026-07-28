@@ -1,17 +1,40 @@
 """Small conditional U-Net — the part of Gedit that IS trained from scratch.
-Predicts the noise added to `after`, conditioned on `before` (concatenated on
-the channel axis — same img2img formulation InstructPix2Pix itself uses) and
-the full per-token CLIP text sequence via cross-attention.
+Predicts the target added to `after`, conditioned on `before` (concatenated on
+the channel axis — same img2img formulation InstructPix2Pix itself uses) and on
+a discrete edit type, whose learned token sequence feeds cross-attention.
 
-Architecture history: v1 (see git log) used FiLM (global scale/shift from a
-single pooled text vector) instead of cross-attention, for simplicity. It
-worked for whole-image style/color edits but could not localize object edits
-("add a hat" produced a global tone shift, not a hat) — a pooled vector
-carries no per-word or spatial information, so the model had no way to know
-*where* "hat" should apply. Cross-attention gives each spatial position a
-query that can attend to the specific word driving it. Timestep conditioning
-stays FiLM (that one's genuinely global — "how much noise" applies to the
-whole image equally); only text conditioning moved to cross-attention.
+Architecture history
+--------------------
+v1 used FiLM: a global scale/shift from one pooled CLIP text vector. It handled
+whole-image style/colour edits but could not localize object edits ("add a hat"
+gave a global tone shift, not a hat), because a pooled vector carries no
+per-word or spatial information.
+
+v2 replaced that with cross-attention over the full per-token CLIP sequence, so
+each spatial position could attend to the specific word driving it. Trained to
+step 94200. Then measurement killed it: runtime/guidance_probe.py showed
+cos(e_cond, e_null) = 1.000 at every timestep, with the conditional/unconditional
+difference at ~1-2% of signal magnitude. The model had learned to almost entirely
+ignore the text, so classifier-free guidance had nothing to amplify — raising its
+scale produced only saturated colour noise, and raising conditioning dropout from
+5% to 20% (a 4.5x increase in null-text exposure) changed nothing.
+
+v3 (this file) keeps the cross-attention machinery untouched and swaps out what
+it attends to: each edit type owns N_TOKENS learned vectors (TypeTokens below)
+instead of a CLIP encoding of a sentence. The model no longer has to learn what
+English means — a hopeless task from 60k pairs, which is why InstructPix2Pix
+fine-tunes Stable Diffusion rather than training from scratch — and instead
+learns a fixed set of named transformations, each backed by thousands of
+consistent examples. Conditioning becomes unambiguous, and spatial routing
+survives (a return to FiLM would have thrown it away again).
+
+Timestep conditioning stays FiLM throughout: "how much noise" genuinely is a
+whole-image quantity, unlike the edit itself.
+
+Also v3: channel_mults gains a fourth level, taking the bottleneck from 32x32
+down to 16x16. At 128px input, three levels left the deepest features with a
+receptive field too small to reason about scene-scale structure, with only one
+self-attention layer to compensate.
 """
 
 import math
@@ -85,11 +108,44 @@ class SelfAttention2d(nn.Module):
         return x + self.proj(out)
 
 
+class TypeTokens(nn.Module):
+    """One learned token sequence per edit type — the conditioning signal that
+    replaced CLIP text embeddings in v3.
+
+    Shape-compatible with what CrossAttention2d already consumed ([B, L, dim]),
+    so the attention path needed no changes at all. The difference is what the
+    tokens mean: previously an encoding of an English sentence the model had no
+    hope of grounding from 60k pairs, now a set of free parameters the model
+    shapes itself, trained by thousands of consistent examples per type.
+
+    N_TOKENS > 1 matters. A single vector per type would collapse this back to
+    something FiLM-like, with nothing for different image regions to attend to
+    differently. Several tokens let the model split a transformation into parts
+    that address different content ("sky" vs "foreground" for a sunset), which is
+    what cross-attention is for.
+
+    Type 0 is the null type used by conditioning dropout and as the guidance
+    baseline. It gets a real learned row like any other, so the unconditional
+    branch is trained rather than extrapolated.
+    """
+
+    def __init__(self, n_types, n_tokens, dim):
+        super().__init__()
+        self.n_tokens = n_tokens
+        self.dim = dim
+        self.emb = nn.Embedding(n_types, n_tokens * dim)
+        nn.init.normal_(self.emb.weight, std=0.02)
+
+    def forward(self, type_ids):
+        """type_ids: [B] long -> [B, n_tokens, dim]."""
+        return self.emb(type_ids).view(-1, self.n_tokens, self.dim)
+
+
 class CrossAttention2d(nn.Module):
-    """Each spatial position (query) attends over the text token sequence
-    (key/value) — this is what lets a specific word ("hat") drive a specific
-    region of the image, instead of every word blending into one global
-    scale/shift like FiLM did.
+    """Each spatial position (query) attends over the conditioning token
+    sequence (key/value) — this is what lets one part of a transformation drive
+    one region of the image, instead of everything blending into a single global
+    scale/shift the way FiLM did.
     """
 
     def __init__(self, channels, text_dim, heads=4):
@@ -101,12 +157,19 @@ class CrossAttention2d(nn.Module):
         self.to_k = nn.Linear(text_dim, channels)
         self.to_v = nn.Linear(text_dim, channels)
         self.proj = nn.Conv2d(channels, channels, 1)
-        # Zero-init, same reasoning as SelfAttention2d — with SEVEN of these
-        # blocks chained through the U-Net (3 down + bottleneck + 3 up), an
+        # Zero-init, same reasoning as SelfAttention2d — with NINE of these
+        # blocks chained through the U-Net (4 down + bottleneck + 4 up), an
         # un-zeroed proj compounds noise at every one of them before the
-        # network has learned anything, which is the leading suspect for why
-        # step 8000 produced near-pure static instead of a blurry-but-coherent
-        # image the way the earlier FiLM model did at a comparable stage.
+        # network has learned anything, which is why an earlier run produced
+        # near-pure static instead of a blurry-but-coherent image the way the
+        # FiLM model did at a comparable stage.
+        #
+        # Note the flip side, learned the hard way: zero-init also lets the model
+        # LEAVE these blocks near zero if conditioning isn't worth using, which is
+        # exactly what happened with CLIP text conditioning. It is the right
+        # initialization, but it only pays off when the conditioning signal is
+        # strong enough to beat the copy-the-input shortcut — hence v3's discrete
+        # types.
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
 
@@ -141,18 +204,23 @@ class Upsample(nn.Module):
 
 
 class UNet(nn.Module):
-    """base_channels=64, channel_mults=(1,2,4) -> 64/128/256, 2 ResBlocks per
-    level. Cross-attention to the full CLIP text sequence after every
-    resolution level's ResBlocks (down and up) plus the bottleneck, so object
-    placement can be driven at multiple spatial scales, not just the
-    coarsest one. Self-attention (spatial-only) also kept at the bottleneck.
+    """base_channels=64, channel_mults=(1,2,4,4) -> 64/128/256/256 at
+    128/64/32/16px, 2 ResBlocks per level. Cross-attention to the edit type's
+    token sequence after every resolution level's ResBlocks (down and up) plus
+    the bottleneck, so a transformation can be driven at multiple spatial scales
+    rather than only the coarsest. Self-attention (spatial-only) also at the
+    bottleneck, where it is cheapest and buys the most long-range mixing.
     """
 
-    def __init__(self, base_channels=64, channel_mults=(1, 2, 4), text_dim=512, time_dim=256):
+    def __init__(self, n_types, base_channels=64, channel_mults=(1, 2, 4, 4),
+                 token_dim=256, n_tokens=8, time_dim=256):
         super().__init__()
         self.base_channels = base_channels
+        self.n_types = n_types
         self.time_mlp = nn.Sequential(
             nn.Linear(base_channels, time_dim), nn.SiLU(), nn.Linear(time_dim, time_dim))
+        self.type_tokens = TypeTokens(n_types, n_tokens, token_dim)
+        text_dim = token_dim
 
         self.in_conv = nn.Conv2d(6, base_channels, 3, padding=1)
 
@@ -193,11 +261,12 @@ class UNet(nn.Module):
         self.out_norm = nn.GroupNorm(8, in_ch)
         self.out_conv = nn.Conv2d(in_ch, 3, 3, padding=1)
 
-    def forward(self, x, t, text_seq):
+    def forward(self, x, t, type_ids):
         """x: [B,6,H,W] (noisy_after || before). t: [B] long.
-        text_seq: [B,L,text_dim] (full CLIP token sequence, not pooled).
+        type_ids: [B] long, edit type indices (0 = null / unconditional).
         """
         t_emb = self.time_mlp(timestep_embedding(t, self.base_channels))
+        text_seq = self.type_tokens(type_ids)
 
         h = self.in_conv(x)
         skips = []

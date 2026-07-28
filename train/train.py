@@ -48,59 +48,110 @@ from torch.utils.data import Dataset, DataLoader
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from model.unet import UNet
 from model.scheduler import DiffusionSchedule
+from data.edit_types import (NULL_TYPE, N_TYPES, SYNTHETIC_TYPES, TYPE_ID,
+                              TYPE_NAMES, real_index_by_type)
+from data.synthetic_edits import SYNTHETIC
 
 
 class PairDataset(Dataset):
-    def __init__(self, data_prefix, split="train", flip=False):
+    """Mixes two supervision sources under one balanced type distribution.
+
+    Synthetic types apply an exact function (data/synthetic_edits.py) to a real
+    `before` image, so every one of the 60k images is a valid pair for every such
+    type — effectively unlimited, perfectly consistent data. Real types read the
+    scraped `after` image for pairs whose prompt named that transformation.
+
+    Types are sampled UNIFORMLY, not in proportion to available data. Without
+    that, `painting` (6290 real pairs) would outvote `sunset_sunrise` (585) more
+    than tenfold, and the synthetic types — which can supply a pair for every
+    image — would swamp everything. Uniform sampling is why the rare-but-coherent
+    types are trainable at all.
+
+    Training draws at random and ignores the index (the epoch is a formality when
+    one source is unbounded); validation walks a fixed deterministic list so the
+    number means the same thing every time it is printed.
+    """
+
+    def __init__(self, data_prefix, split="train", flip=False, val_pairs=8,
+                 nominal_len=100_000):
         with open(f"{data_prefix}_meta.json") as f:
             meta = json.load(f)
         self.res = meta["res"]
-        self.text_dim = meta["text_dim"]
-        self.seq_len = meta["seq_len"]
         n, val_n = meta["n"], meta["val_n"]
         self.images = np.memmap(f"{data_prefix}_images.bin", dtype=np.uint8, mode="r",
                                  shape=(n, 2, 3, self.res, self.res))
-        self.text = np.memmap(f"{data_prefix}_text.bin", dtype=np.float32, mode="r",
-                               shape=(n, self.seq_len, self.text_dim))
-        self.idx = range(0, n - val_n) if split == "train" else range(n - val_n, n)
-        # Never augment the validation split — its whole job is being the same
-        # measurement every time.
+        self.n = n
+        self.split = split
         self.flip = flip and split == "train"
 
-        # A flip contradicts any prompt that names a side ("move the cup to the
-        # left"), so those rows opt out. The prompt list is index-aligned with
-        # the binaries; datasets prepared before it was added simply don't get
-        # flipped, rather than getting flipped unsafely.
-        self.flippable = None
-        prompts_path = f"{data_prefix}_prompts.json"
-        if self.flip:
-            if os.path.exists(prompts_path):
-                with open(prompts_path) as f:
-                    prompts = json.load(f)
-                self.flippable = [
-                    not any(w in p.lower() for w in ("left", "right"))
-                    for p in prompts
-                ]
-                blocked = len(self.flippable) - sum(self.flippable)
-                print(f"flip augmentation on ({blocked} prompts opted out for left/right)")
-            else:
-                print(f"flip augmentation requested but {prompts_path} is missing — "
-                      f"disabled (can't tell which prompts name a side)")
-                self.flip = False
+        with open(f"{data_prefix}_prompts.json") as f:
+            prompts = json.load(f)
+        by_type = real_index_by_type(prompts)
+
+        # Hold the tail out of training entirely, for both sources.
+        train_cut = n - val_n
+        self.image_pool = (list(range(train_cut)) if split == "train"
+                           else list(range(train_cut, n)))
+        self.real_by_type = {
+            t: [i for i in idxs if (i < train_cut) == (split == "train")]
+            for t, idxs in by_type.items()
+        }
+        self.real_by_type = {t: v for t, v in self.real_by_type.items() if v}
+
+        self.synth_ids = [TYPE_ID[name] for name in SYNTHETIC_TYPES]
+        self.synth_fn = {TYPE_ID[name]: SYNTHETIC[name] for name in SYNTHETIC_TYPES}
+        self.sampleable = self.synth_ids + sorted(self.real_by_type)
+
+        if split == "train":
+            counts = ", ".join(f"{TYPE_NAMES[t]}={len(v)}"
+                               for t, v in sorted(self.real_by_type.items()))
+            print(f"{len(self.synth_ids)} synthetic types (unlimited pairs each)")
+            print(f"{len(self.real_by_type)} real types: {counts}")
+            print(f"sampling types uniformly over {len(self.sampleable)} of them")
+
+        # Deterministic validation list: every sampleable type, in order, repeated
+        # until val_pairs*len(types) examples exist.
+        self.val_items = []
+        if split != "train":
+            for k in range(val_pairs):
+                for t in self.sampleable:
+                    pool = self.real_by_type.get(t, self.image_pool)
+                    self.val_items.append((t, pool[k % len(pool)]))
+
+        self.nominal_len = nominal_len if split == "train" else len(self.val_items)
 
     def __len__(self):
-        return len(self.idx)
+        return self.nominal_len
+
+    def _load(self, j, which):
+        arr = self.images[j, which].copy()
+        return torch.from_numpy(arr).float() / 127.5 - 1.0
+
+    def _build(self, type_id, j):
+        before = self._load(j, 0)
+        if type_id in self.synth_fn:
+            after = self.synth_fn[type_id](before)
+        else:
+            after = self._load(j, 1)
+        return before, after
 
     def __getitem__(self, i):
-        j = self.idx[i]
-        before = torch.from_numpy(self.images[j, 0].copy()).float() / 127.5 - 1.0
-        after = torch.from_numpy(self.images[j, 1].copy()).float() / 127.5 - 1.0
-        text = torch.from_numpy(self.text[j].copy())
-        if self.flip and self.flippable[j] and random.random() < 0.5:
-            # Both images flipped together — the edit relationship has to survive.
+        if self.split == "train":
+            type_id = random.choice(self.sampleable)
+            pool = self.real_by_type.get(type_id, self.image_pool)
+            j = random.choice(pool)
+        else:
+            type_id, j = self.val_items[i]
+
+        before, after = self._build(type_id, j)
+
+        # Horizontal flip is safe for every type kept here: none of them name a
+        # side, and the synthetic functions are all per-pixel or symmetric, so
+        # flipping both images preserves the relationship exactly.
+        if self.flip and random.random() < 0.5:
             before = torch.flip(before, dims=[-1])
             after = torch.flip(after, dims=[-1])
-        return before, after, text
+        return before, after, torch.tensor(type_id, dtype=torch.long)
 
 
 class EMA:
@@ -129,36 +180,30 @@ class EMA:
         self.shadow = {k: v.clone().float() for k, v in sd.items()}
 
 
-def load_null_text(seq_len, text_dim, device):
-    """CLIP embedding of the empty string — the target that conditioning
-    dropout replaces real prompts with, and the branch guidance interpolates
-    from at sampling time. Computed here rather than baked into the dataset so
-    the existing 60k Kaggle Dataset doesn't need regenerating; it's one forward
-    pass through the already-frozen encoder.
-    """
-    from model.clip_encoder import ClipTextEncoder
-    enc = ClipTextEncoder(device="cpu")
-    if enc.seq_len != seq_len or enc.embed_dim != text_dim:
-        raise SystemExit(
-            f"null-text shape mismatch: encoder gives ({enc.seq_len}, {enc.embed_dim}), "
-            f"dataset was built with ({seq_len}, {text_dim}). The dataset and "
-            f"model/clip_encoder.py disagree — rebuild the text embeddings "
-            f"(data/reencode_text.py) before training.")
-    return enc.encode([""])[0].to(device)  # [seq_len, text_dim]
+def min_snr_weights(schedule, t, gamma, prediction="v"):
+    """Min-SNR-gamma (Hang et al. 2023). SNR_t = acp_t / (1 - acp_t): huge at low
+    noise, tiny at high noise. Unweighted MSE therefore lets the low-noise steps
+    dominate the gradient, where the task is nearly trivial; clipping the weight
+    at gamma (5 is the paper's default) hands that budget back to the steps that
+    decide image content.
 
+    The two parameterizations need different denominators — min(SNR,g)/SNR for
+    epsilon, min(SNR,g)/(SNR+1) for v — because v-prediction already carries an
+    implicit SNR-dependent weighting of its own. Using the epsilon form with
+    v-prediction double-counts it.
 
-def min_snr_weights(schedule, t, gamma):
-    """min(SNR_t, gamma) / SNR_t — the eps-prediction form of Min-SNR-gamma
-    (Hang et al. 2023). SNR_t = acp_t / (1 - acp_t): huge at low noise, tiny at
-    high noise. Unweighted MSE therefore spends most of its gradient on the
-    high-noise steps where any near-mean guess scores well, which is exactly
-    the "loss flattened at step 300 but quality kept climbing" mismatch seen
-    here. Clipping the weight at gamma (5 is the paper's default) hands that
-    budget back to the steps that decide image content.
+    (A note against a mistake made once while reading this: min-SNR does NOT
+    down-weight the high-noise end. At t=999, SNR is ~4e-5, far below gamma, so
+    min(SNR,gamma)/SNR = 1 — full weight. It is the low-noise steps that get
+    suppressed.)
     """
     acp = schedule.alphas_cumprod[t]
     snr = acp / (1.0 - acp)
-    return (snr.clamp(max=gamma) / snr).view(-1, 1, 1, 1)
+    if prediction == "eps":
+        w = snr.clamp(max=gamma) / snr
+    else:
+        w = snr.clamp(max=gamma) / (snr + 1.0)
+    return w.view(-1, 1, 1, 1)
 
 
 def main(args):
@@ -169,22 +214,23 @@ def main(args):
                                num_workers=2, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
-    model = UNet(text_dim=train_ds.text_dim).to(device)
+    model = UNet(n_types=N_TYPES).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"UNet params: {n_params/1e6:.1f}M")
+    print(f"UNet params: {n_params/1e6:.1f}M  ({N_TYPES} edit types)")
 
     raw_model = model
     if torch.cuda.device_count() > 1 and not args.single_gpu:
         model = torch.nn.DataParallel(model)
         print(f"DataParallel across {torch.cuda.device_count()} GPUs")
 
-    schedule = DiffusionSchedule(device=device)
+    schedule = DiffusionSchedule(schedule=args.noise_schedule,
+                                  prediction=args.prediction, device=device)
+    print(f"schedule: {args.noise_schedule}, predicting: {args.prediction}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    null_text = None
     if args.text_dropout > 0:
-        null_text = load_null_text(train_ds.seq_len, train_ds.text_dim, device)
-        print(f"conditioning dropout: text {args.text_dropout}, image {args.image_dropout}")
+        print(f"conditioning dropout: type -> null {args.text_dropout}, "
+              f"image -> zeros {args.image_dropout}")
 
     step = 0
     os.makedirs(args.out, exist_ok=True)
@@ -192,7 +238,22 @@ def main(args):
     ema = EMA(raw_model, args.ema_decay) if args.ema_decay > 0 else None
     if args.resume and os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location=device)
-        raw_model.load_state_dict(ckpt["model"])
+        # A checkpoint from a previous architecture generation resumes into a
+        # wall of shape errors that says nothing useful. v3 changed the
+        # conditioning, the depth and the parameterization all at once, and the
+        # v2 checkpoints (up to step 94200) are still lying around in Kaggle
+        # datasets, so name the problem explicitly.
+        want = raw_model.state_dict()
+        got = ckpt["model"]
+        bad = [k for k in want if k not in got or want[k].shape != got[k].shape]
+        if bad:
+            raise SystemExit(
+                f"checkpoint at {ckpt_path} (step {ckpt.get('step')}) does not match "
+                f"this model: {len(bad)} parameters differ or are missing, first few "
+                f"{bad[:3]}. It is almost certainly from an earlier architecture — "
+                f"train from scratch instead of resuming, or detach the stale "
+                f"checkpoint dataset from the kernel's inputs.")
+        raw_model.load_state_dict(got)
         opt.load_state_dict(ckpt["opt"])
         step = ckpt["step"]
         if ema is not None:
@@ -219,30 +280,32 @@ def main(args):
         opt.zero_grad()
         loss_accum = 0.0
         for _ in range(args.grad_accum):
-            before, after, text_seq = next(data_iter)
-            before, after, text_seq = before.to(device), after.to(device), text_seq.to(device)
+            before, after, type_ids = next(data_iter)
+            before, after, type_ids = before.to(device), after.to(device), type_ids.to(device)
             b = before.shape[0]
 
-            if null_text is not None:
+            if args.text_dropout > 0:
                 # Independent masks, so all four combinations occur: full
-                # conditioning, image-only, text-only, and neither. Guidance at
-                # sampling time needs every one of those branches to be
-                # something the model was actually trained on.
-                drop_text = torch.rand(b, device=device) < args.text_dropout
+                # conditioning, image-only, type-only, and neither. Guidance at
+                # sampling time needs every one of those branches to be something
+                # the model was actually trained on.
+                drop_type = torch.rand(b, device=device) < args.text_dropout
                 drop_image = torch.rand(b, device=device) < args.image_dropout
-                text_seq = torch.where(drop_text[:, None, None], null_text.expand_as(text_seq),
-                                       text_seq)
+                type_ids = torch.where(drop_type,
+                                       torch.full_like(type_ids, NULL_TYPE), type_ids)
                 before = torch.where(drop_image[:, None, None, None],
                                      torch.zeros_like(before), before)
 
             t = torch.randint(0, schedule.timesteps, (b,), device=device)
             noisy_after, noise = schedule.q_sample(after, t)
-            pred = model(torch.cat([noisy_after, before], dim=1), t, text_seq)
+            target = schedule.target(after, noise, t)
+            pred = model(torch.cat([noisy_after, before], dim=1), t, type_ids)
             if args.min_snr_gamma > 0:
-                w = min_snr_weights(schedule, t, args.min_snr_gamma)
-                loss = (w * (pred - noise) ** 2).mean()
+                w = min_snr_weights(schedule, t, args.min_snr_gamma,
+                                     prediction=args.prediction)
+                loss = (w * (pred - target) ** 2).mean()
             else:
-                loss = F.mse_loss(pred, noise)
+                loss = F.mse_loss(pred, target)
             loss = loss / args.grad_accum
             loss.backward()
             loss_accum += loss.item()
@@ -282,13 +345,15 @@ def main(args):
             # than actual progress. Same t's every time makes it comparable.
             gen = torch.Generator(device="cpu").manual_seed(1234)
             with torch.no_grad():
-                for before, after, text_seq in val_loader:
-                    before, after, text_seq = before.to(device), after.to(device), text_seq.to(device)
+                for before, after, type_ids in val_loader:
+                    before, after, type_ids = (before.to(device), after.to(device),
+                                                type_ids.to(device))
                     b = before.shape[0]
                     t = torch.randint(0, schedule.timesteps, (b,), generator=gen).to(device)
                     noisy_after, noise = schedule.q_sample(after, t)
-                    pred = model(torch.cat([noisy_after, before], dim=1), t, text_seq)
-                    vloss += F.mse_loss(pred, noise).item()
+                    target = schedule.target(after, noise, t)
+                    pred = model(torch.cat([noisy_after, before], dim=1), t, type_ids)
+                    vloss += F.mse_loss(pred, target).item()
                     n_batches += 1
             print(f"  val loss {vloss / max(n_batches, 1):.4f}")
             model.train()
@@ -322,10 +387,13 @@ if __name__ == "__main__":
                     help="horizon of the cosine decay; 0 falls back to --max-steps. Set this "
                          "to the total training length you actually intend, so raising the "
                          "--max-steps ceiling between sessions doesn't reset the LR upward")
-    p.add_argument("--text-dropout", type=float, default=0.05,
-                    help="probability of replacing the prompt with null text, so "
+    p.add_argument("--noise-schedule", choices=("cosine", "linear"), default="cosine")
+    p.add_argument("--prediction", choices=("v", "eps"), default="v")
+    p.add_argument("--text-dropout", type=float, default=0.1,
+                    help="probability of replacing the edit type with the null type, so "
                          "classifier-free guidance has a trained unconditional branch. "
-                         "0 disables conditioning dropout entirely (and skips loading CLIP)")
+                         "Runs from step 0 here — added late to the previous model, it "
+                         "never caught up (see kaggle/02-train.py's history)")
     p.add_argument("--image-dropout", type=float, default=0.05,
                     help="probability of zeroing `before`; enables the image-guidance "
                          "scale in model/scheduler.py's sampler")

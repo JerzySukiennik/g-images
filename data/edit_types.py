@@ -1,108 +1,126 @@
-"""Discrete edit-type taxonomy — the conditioning signal for Gedit v2.
+"""Discrete edit-type taxonomy — the conditioning signal for Gedit v3.
 
-Why this replaces free-form CLIP text conditioning
+Why this replaced free-form CLIP text conditioning
 --------------------------------------------------
 Measured on the step-94200 checkpoint (runtime/guidance_probe.py): the cosine
-similarity between the model's noise prediction given the real prompt and given
-an empty prompt is 1.000 at every timestep, and the difference vector is ~1-2%
-of the signal magnitude. The model had learned to almost entirely ignore the
-text. Classifier-free guidance then has nothing to amplify, which is why raising
-its scale only ever produced saturated colour noise, and why raising conditioning
-dropout from 5% to 20% changed nothing.
+similarity between the model's prediction given the real prompt and given an empty
+prompt was 1.000 at every timestep, with the difference vector at ~1-2% of signal
+magnitude. The model had learned to almost entirely ignore the text, so
+classifier-free guidance had nothing to amplify — which is why raising its scale
+only produced saturated colour noise, and why raising conditioning dropout from 5%
+to 20% (4.5x more null exposure) changed nothing at all.
 
-That is not a bug to fix with more steps. With `before` concatenated on the
-channel axis, copying the input is by far the cheapest way to lower the MSE, so
-the only reason to learn language would be to explain the residual — and 60k
-pairs is orders of magnitude too little to learn what English phrases mean from
-scratch. InstructPix2Pix does not do this either: it fine-tunes Stable Diffusion,
-which already understands text from billions of image-caption pairs, and adds
-450k edit pairs on top.
+That is not fixable with more steps. With `before` concatenated on the channel
+axis, copying the input is by far the cheapest way to lower the loss, so learning
+language would only pay off for explaining the residual — and 60k pairs is orders
+of magnitude too little to learn what English phrases mean from scratch.
+InstructPix2Pix does not attempt it either: it fine-tunes Stable Diffusion, which
+already understands text from billions of image-caption pairs.
 
-So the model stops learning language and learns a small number of concrete
-transformations instead. Each type gets its own learned token sequence (see
-model/unet.py's TypeTokens) feeding the same cross-attention the CLIP sequence
-used to feed — conditioning becomes unambiguous and strong, while spatial
-routing (the whole reason cross-attention replaced FiLM) is preserved. Mapping a
-user's free-form sentence onto one of these types is an inference-time concern,
-deliberately deferred.
+Why the type list looks like this
+---------------------------------
+kaggle/04-probe-types.py counted the real 60k prompts against an earlier, larger
+taxonomy. Two findings reshaped it:
 
-Rules are ordered: the first match wins, so put specific patterns above generic
-ones. classify() returns None for prompts that match nothing, and those pairs are
-dropped from training — a pair whose transformation we cannot name is exactly the
-kind of inconsistent supervision that taught the model to ignore conditioning.
+1. The transformations we most wanted are barely present. "black and white" has
+   588 examples in 60000; sepia has 182; "brighter" has 3. We spent the entire day
+   judging the model on an edit represented by 1% of its training data.
+
+2. 23% of the corpus fell into a `replace_with` bucket ("make it the Taj Mahal",
+   "make her a panda") and another 7% into `add_object`. Those name no single
+   transformation, so training them as one type would recreate the exact
+   inconsistent supervision this taxonomy exists to remove. Both are dropped. That
+   does mean "add a hat" is out of scope for now — a deliberate cost of Jurek's
+   "make it actually do something, prompts later" call.
+
+So types split by where good supervision comes from:
+
+  SYNTHETIC_TYPES — edits that are exact functions of the input, generated on the
+  fly by data/synthetic_edits.py from the `before` images already on disk. Every
+  one of the 60k images is a valid pair for every one of these, so the data is
+  unlimited and perfectly consistent. For these, synthetic supervision is strictly
+  better than the scraped kind, which was both scarce and imperfect (the corpus's
+  own "make it black and white" targets are Stable Diffusion outputs, not true
+  desaturations).
+
+  REAL_TYPES — edits no deterministic function can produce, kept only where the
+  probe found enough consistent examples to teach one. Counts from the probe are
+  in the comments; anything under ~400 was dropped as untrainable.
+
+Type 0 is `null`: the trained unconditional branch used by conditioning dropout
+and as the guidance baseline.
 """
 
-# NULL_TYPE is the trained unconditional branch: conditioning dropout swaps a
-# real type for this one, and sampling uses it as the guidance baseline. It is a
-# real embedding row, not zeros, so the branch is something the model was taught
-# rather than something it extrapolates.
 NULL_TYPE = 0
 
-# (name, [substrings]) — matched case-insensitively against the whole prompt.
-RULES = [
-    ("black_and_white", ["black and white", "grayscale", "greyscale", "monochrome",
-                          "desaturate", "remove the color", "remove the colour"]),
-    ("sepia_vintage", ["sepia", "vintage", "retro", "old photo", "aged photo",
-                        "antique"]),
-    ("painting", ["painting", "oil paint", "watercolor", "watercolour", "as a canvas",
-                   "impressionist", "van gogh", "picasso", "monet"]),
-    ("drawing_sketch", ["sketch", "pencil drawing", "charcoal", "line drawing",
-                         "as a drawing", "doodle"]),
-    ("cartoon_anime", ["cartoon", "anime", "comic", "cel shad", "pixar",
-                        "as an illustration"]),
-    ("pixel_art", ["pixel art", "8-bit", "8 bit", "16-bit", "voxel"]),
-    ("snow_winter", ["snow", "winter", "blizzard", "frozen", "icy", "frost"]),
-    ("rain_storm", ["rain", "storm", "thunder", "lightning", "wet weather"]),
-    ("fog_mist", ["fog", "mist", "haze", "smog"]),
-    ("sunset_sunrise", ["sunset", "sunrise", "golden hour", "dusk", "dawn"]),
-    ("night", ["night", "at midnight", "dark sky", "moonlit", "starry"]),
-    ("autumn", ["autumn", "fall colors", "fall colours", "autumnal"]),
-    ("spring_bloom", ["spring", "blossom", "in bloom", "flowers everywhere"]),
-    ("desert", ["desert", "sand dune", "sahara", "arid"]),
-    ("underwater", ["underwater", "under the sea", "submerged", "ocean floor"]),
-    ("space_scifi", ["space", "galaxy", "nebula", "sci-fi", "futuristic",
-                      "cyberpunk", "neon city"]),
-    ("fire_lava", ["fire", "flames", "burning", "lava", "volcanic", "on fire"]),
-    ("apocalypse_ruin", ["apocalyp", "ruined", "abandoned", "destroyed",
-                          "post-apocalyptic", "wasteland"]),
-    ("brighter", ["brighter", "brighten", "more light", "well lit", "increase exposure"]),
-    ("darker", ["darker", "darken", "less light", "dim the", "decrease exposure"]),
-    ("more_colorful", ["more colorful", "more colourful", "vibrant", "saturate",
-                        "vivid", "psychedelic"]),
-    ("blur_background", ["blur", "bokeh", "depth of field", "out of focus"]),
-    ("add_object", ["add ", "put a ", "put an ", "give it a ", "give him a ",
-                     "give her a ", "place a ", "insert a "]),
-    ("remove_object", ["remove ", "delete ", "erase ", "take away ", "get rid of"]),
-    ("replace_with", ["replace ", "turn the ", "swap ", "change the ", "make the "]),
+# Exact image functions — see data/synthetic_edits.py for the implementations.
+# Unlimited pairs each, so these carry the burden of proving the model can follow
+# conditioning at all.
+SYNTHETIC_TYPES = [
+    "black_and_white",
+    "sepia_vintage",
+    "brighter",
+    "darker",
+    "more_colorful",
+    "less_colorful",
+    "blur_background",
+    "sharper",
+    "warmer",
+    "cooler",
+    "inverted",
+    "high_contrast",
+    "low_contrast",
 ]
 
-TYPE_NAMES = ["null"] + [name for name, _ in RULES]
+# Scraped from the real pairs. (probe count in the 60k set)
+REAL_RULES = [
+    ("painting", ["painting", "oil paint", "watercolor", "watercolour",
+                   "impressionist", "van gogh", "monet", "picasso"]),          # 6290
+    ("rain_storm", ["rain", "storm", "thunder", "lightning"]),                  # 2116
+    ("snow_winter", ["snow", "winter", "blizzard", "frozen", "icy", "frost"]),  # 1497
+    ("cartoon_anime", ["cartoon", "anime", "comic", "cel shad", "pixar"]),      # 1291
+    ("desert", ["desert", "sand dune", "sahara", "arid"]),                      # 1156
+    ("fire_lava", ["fire", "flames", "burning", "lava", "volcanic"]),           # 901
+    ("night", ["night", "midnight", "dark sky", "moonlit", "starry"]),          # 792
+    ("sunset_sunrise", ["sunset", "sunrise", "golden hour", "dusk", "dawn"]),   # 585
+    ("space_scifi", ["space", "galaxy", "nebula", "sci-fi", "futuristic",
+                      "cyberpunk", "neon"]),                                    # 486
+    ("drawing_sketch", ["sketch", "pencil drawing", "charcoal", "line drawing",
+                         "woodcut", "ink drawing"]),                            # 422
+]
+
+REAL_TYPES = [name for name, _ in REAL_RULES]
+TYPE_NAMES = ["null"] + SYNTHETIC_TYPES + REAL_TYPES
 N_TYPES = len(TYPE_NAMES)
+TYPE_ID = {name: i for i, name in enumerate(TYPE_NAMES)}
 
 
-def classify(prompt):
-    """prompt: str -> type id in 1..N_TYPES-1, or None if nothing matches.
+def classify_real(prompt):
+    """prompt: str -> type id for one of REAL_TYPES, or None.
 
-    Never returns NULL_TYPE: that id belongs to conditioning dropout, not to any
-    real prompt.
+    Ordered: first match wins, so more specific patterns sit higher. Returns None
+    for anything unmatched, and those pairs are dropped rather than swept into a
+    catch-all — an unnameable transformation is precisely the supervision that
+    taught the previous model to ignore its conditioning.
+
+    Deliberately never returns a synthetic type, even when a prompt mentions one:
+    the corpus's own "make it black and white" targets are generated images, not
+    true desaturations, so mixing them in would contradict the exact synthetic
+    pairs.
     """
     p = prompt.lower()
-    for i, (_, needles) in enumerate(RULES, start=1):
+    for name, needles in REAL_RULES:
         for needle in needles:
             if needle in p:
-                return i
+                return TYPE_ID[name]
     return None
 
 
-def classify_all(prompts):
-    """-> (labels, kept_indices). labels is aligned with kept_indices, not with
-    the input, since unmatched prompts are dropped rather than bucketed into a
-    catch-all class (a catch-all would be the inconsistent supervision this
-    taxonomy exists to remove)."""
-    labels, kept = [], []
+def real_index_by_type(prompts):
+    """prompts: list[str] -> {type_id: [indices]} for the real types only."""
+    out = {}
     for i, p in enumerate(prompts):
-        t = classify(p)
+        t = classify_real(p)
         if t is not None:
-            labels.append(t)
-            kept.append(i)
-    return labels, kept
+            out.setdefault(t, []).append(i)
+    return out
