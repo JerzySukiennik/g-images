@@ -1,4 +1,4 @@
-# Gedit
+# G-Images
 
 Drugi model w rodzinie [MicroG](https://github.com/JerzySukiennik/microg) — a local, from-scratch diffusion model for photo editing, trained by [Jurek](https://github.com/JerzySukiennik). "G" (Gzowo, same root as MicroG) + "edit" (what it does).
 

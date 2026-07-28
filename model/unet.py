@@ -1,4 +1,4 @@
-"""Small conditional U-Net — the part of Gedit that IS trained from scratch.
+"""Small conditional U-Net — the part of G-Images that IS trained from scratch.
 Predicts the target added to `after`, conditioned on `before` (concatenated on
 the channel axis — same img2img formulation InstructPix2Pix itself uses) and on
 a discrete edit type, whose learned token sequence feeds cross-attention.

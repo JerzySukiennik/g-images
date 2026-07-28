@@ -1,6 +1,6 @@
 """Sweep classifier-free guidance scales on an existing checkpoint.
 
-Why this exists: every judgement of Gedit's quality so far was made at
+Why this exists: every judgement of G-Images's quality so far was made at
 guidance = 1.0, i.e. sampling the model's raw prediction. That is not how
 text-conditioned diffusion is sampled — InstructPix2Pix's own results use
 text guidance ~7.5. With `before` concatenated on the channel axis, copying

@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 
-REPO = "https://github.com/JerzySukiennik/gedit.git"
+REPO = "https://github.com/JerzySukiennik/g-images.git"
 WORK = "/kaggle/working"
 
 if os.path.exists(f"{WORK}/gedit"):

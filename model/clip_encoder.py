@@ -1,4 +1,4 @@
-"""Frozen pretrained CLIP text encoder — the one part of Gedit NOT trained
+"""Frozen pretrained CLIP text encoder — the one part of G-Images NOT trained
 from scratch (see SPEC.md #2: hand-training a text encoder good enough to
 understand arbitrary edit instructions is a separate project the size of
 MicroG itself).

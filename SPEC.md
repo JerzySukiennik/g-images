@@ -1,4 +1,4 @@
-# Gedit — SPEC v1
+# G-Images — SPEC v1
 
 Drugi model w rodzinie [[microg|MicroG]]: lokalny, w 100% własny model do edycji zdjęć, wywoływany głosem z [[gzowo-ai]] ("zrób mi zdjęcie i spraw żeby wyglądało jak X"), edytujący klatkę z kamery LOKALNIE (nie przez zewnętrzne API) i pokazujący wynik w oknie asystenta.
 
@@ -6,7 +6,7 @@ Status: **spec do zatwierdzenia, przed pierwszym kodem** (ta sama reguła co prz
 
 ## 0. Nazwa i marka (2026-07-21)
 
-**Gedit** — "G" (Gzowo, ten sam rdzeń co MicroG) + "edit" (dokładnie to, co model robi). Świadoma kolizja nazwy z linuksowym edytorem tekstu `gedit` — inny kontekst, mało prawdopodobne pomylenie w praktyce, zaakceptowana przez Jurka.
+**G-Images** — "G" (Gzowo, ten sam rdzeń co MicroG) + "edit" (dokładnie to, co model robi). Świadoma kolizja nazwy z linuksowym edytorem tekstu `gedit` — inny kontekst, mało prawdopodobne pomylenie w praktyce, zaakceptowana przez Jurka.
 
 **Logo: monogram, ten sam szkielet geometrii co µG.** Lewy znak nie jest literą — to **crop-mark** (dwa przeciwległe narożniki L, uniwersalna ikona kadrowania/edycji zdjęć), stojący w miejscu µ dokładnie tak, jak µ stoi za słowem "micro". Zajmuje IDENTYCZNY bounding box co µ w MicroG (x 60-132, y 74-172), więc para czyta się na tej samej wadze optycznej i nie wymaga przeliczania transformu w ikonie. Prawa strona (G, promień 50, środek 200,90) jest **dosłownie tą samą ścieżką SVG** co w MicroG — ta sama grubość kreski 15, ta sama linia bazowa 140.
 

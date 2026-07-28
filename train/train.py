@@ -1,4 +1,4 @@
-"""Gedit training loop — diffusion noise-prediction loss on (before, after,
+"""G-Images training loop — diffusion noise-prediction loss on (before, after,
 text_seq) triples prepared by data/fetch_dataset.py. Mirrors MicroG's
 train/train.py conventions: gradient accumulation, DataParallel across
 Kaggle's T4x2, checkpointing every --ckpt-every steps so a killed 12h session

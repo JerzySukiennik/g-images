@@ -1,4 +1,4 @@
-"""Kaggle/CPU dataset builder for Gedit.
+"""Kaggle/CPU dataset builder for G-Images.
 
 Streams `timbrooks/instructpix2pix-clip-filtered` from Hugging Face (it's far
 too large to keep in full — see SPEC.md #2), takes the first `--n` pairs,

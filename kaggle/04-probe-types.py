@@ -20,7 +20,7 @@ import subprocess
 import sys
 from collections import Counter
 
-REPO = "https://github.com/JerzySukiennik/gedit.git"
+REPO = "https://github.com/JerzySukiennik/g-images.git"
 BOOT = "/tmp/gedit-boot"
 
 subprocess.run(["git", "clone", "--depth", "1", REPO, BOOT], check=True)

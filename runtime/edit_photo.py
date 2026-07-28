@@ -1,4 +1,4 @@
-"""Manual hands-on test: apply one of Gedit's edit types to any photo from the
+"""Manual hands-on test: apply one of G-Images's edit types to any photo from the
 terminal.
 
 v3 takes --type (a name from data/edit_types.py) instead of a free-form --prompt.

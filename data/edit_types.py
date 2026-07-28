@@ -1,4 +1,4 @@
-"""Discrete edit-type taxonomy — the conditioning signal for Gedit v3.
+"""Discrete edit-type taxonomy — the conditioning signal for G-Images v3.
 
 Why this replaced free-form CLIP text conditioning
 --------------------------------------------------

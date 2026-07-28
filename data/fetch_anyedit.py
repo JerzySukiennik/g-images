@@ -1,4 +1,4 @@
-"""Dataset builder for AnyEdit — the corpus Gedit moved to for semantic edits.
+"""Dataset builder for AnyEdit — the corpus G-Images moved to for semantic edits.
 
 Why AnyEdit replaced InstructPix2Pix
 ------------------------------------

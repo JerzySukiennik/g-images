@@ -4,7 +4,7 @@ bridge via onnxruntime-node (SPEC.md #3).
 The frozen CLIP text encoder is NOT exported here — the Node side uses
 transformers.js to tokenize and encode the free-form instruction directly in
 JS (it already ships CLIP text models runnable in Node/browser), so only the
-part of Gedit that's actually trained from scratch needs converting.
+part of G-Images that's actually trained from scratch needs converting.
 """
 
 import argparse

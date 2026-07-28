@@ -1,4 +1,4 @@
-# Trening Gedit na Kaggle — instrukcja
+# Trening G-Images na Kaggle — instrukcja
 
 Ten sam plan co przy [[microg|MicroG]]: **30 h GPU tygodniowo za darmo** (T4 ×2), sesja ucinana po 12 h, wszystko poniżej zbudowane pod wznawianie.
 
