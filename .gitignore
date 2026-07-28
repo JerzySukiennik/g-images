@@ -17,3 +17,9 @@ __pycache__/
 
 # Kaggle orchestration working dir (checkpoints, kernel metadata)
 kaggle-run/
+
+# ...but the AnyEdit shard->type index IS source: 28 KB, built by scanning all
+# 383 parquet footers, and data/fetch_anyedit.py cannot pick shards without it.
+# It was silently excluded by the rule above once already, which failed all three
+# prep kernels at startup.
+!data/anyedit_shardmap.json
