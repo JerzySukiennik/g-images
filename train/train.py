@@ -53,6 +53,24 @@ from data.edit_types import (NULL_TYPE, N_TYPES, SYNTHETIC_TYPES, TYPE_ID,
 from data.synthetic_edits import SYNTHETIC
 
 
+def grow_to(old, target):
+    """Pad `old` with zeros so it matches `target`'s shape, keeping old values in
+    the leading rows. Returns `old` unchanged when the shapes already agree.
+
+    Growing the edit-type taxonomy changes one parameter's row count, and EVERY
+    structure holding a per-parameter tensor has to follow. That is three places,
+    and this project found them one crash at a time: the model weights, AdamW's
+    two momentum buffers, and the EMA shadow copy. Hence one helper used by all
+    three rather than three ad-hoc patches — the next satellite structure added
+    should use it too.
+    """
+    if old.shape == target.shape:
+        return old
+    grown = torch.zeros_like(target)
+    grown[:old.shape[0]] = old.to(grown.dtype)
+    return grown
+
+
 class PairDataset(Dataset):
     """Mixes synthetic and AnyEdit supervision across several prep shards.
 
@@ -186,6 +204,18 @@ class EMA:
     def load_state_dict(self, sd):
         self.shadow = {k: v.clone().float() for k, v in sd.items()}
 
+    def adapt_to(self, model):
+        """Resize any shadow entry whose parameter changed shape — otherwise the
+        first update() dies on a 24-vs-64 row mismatch, which is exactly how the
+        first attempt at resuming into a larger taxonomy failed."""
+        for k, v in model.state_dict().items():
+            cur = self.shadow.get(k)
+            if cur is None:
+                self.shadow[k] = v.detach().clone().float()
+            elif cur.shape != v.shape:
+                self.shadow[k] = grow_to(cur, v.detach().float())
+                print(f"grew EMA {k} {tuple(cur.shape)} -> {tuple(v.shape)}")
+
 
 def min_snr_weights(schedule, t, gamma, prediction="v"):
     """Min-SNR-gamma (Hang et al. 2023). SNR_t = acp_t / (1 - acp_t): huge at low
@@ -264,9 +294,7 @@ def main(args):
         if key in got and key in want and got[key].shape != want[key].shape:
             old_rows, new_rows = got[key].shape[0], want[key].shape[0]
             if got[key].shape[1:] == want[key].shape[1:] and new_rows > old_rows:
-                grown = want[key].clone()
-                grown[:old_rows] = got[key]
-                got[key] = grown
+                got[key] = grow_to(got[key], want[key])
                 print(f"grew the edit-type table {old_rows} -> {new_rows} rows, "
                       f"keeping the learned ones (new rows start from init)")
 
@@ -294,14 +322,13 @@ def main(args):
             for key in ("exp_avg", "exp_avg_sq"):
                 v = st.get(key)
                 if v is not None and v.shape != emb.shape:
-                    grown_state = torch.zeros_like(emb)
-                    grown_state[:v.shape[0]] = v.to(grown_state.dtype)
-                    st[key] = grown_state
+                    st[key] = grow_to(v, emb)
                     print(f"grew optimizer {key} {tuple(v.shape)} -> {tuple(emb.shape)}")
         step = ckpt["step"]
         if ema is not None:
             if "ema" in ckpt:
                 ema.load_state_dict(ckpt["ema"])
+                ema.adapt_to(raw_model)
             else:
                 # Checkpoint from before EMA existed: seed the average from the
                 # weights we just loaded rather than from a fresh init, so it
