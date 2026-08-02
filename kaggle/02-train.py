@@ -124,10 +124,37 @@ OUT = f"{WORK}/run"
 # healthy: train/train.py exits cleanly at --max-steps, the checkpoint lands, and
 # the next session resumes. Costs one extra checkpoint upload, saves hours of
 # thrashing.
-BATCH, ACCUM, WARMUP = 32, 1, 200
-TOTAL_STEPS = 60000
-SESSION_STEPS = 18000
-LR_DECAY_STEPS = 60000
+# --- v5, 2026-08-02: bigger model, from scratch ---------------------------------
+# The 22.4M model reached step 59200 and answered the open question negatively:
+# doubling the object types' exposure did NOT sharpen them, and it visibly
+# DEGRADED black_and_white, which had been clean at 41200 (colour speckles appeared
+# where the ground truth is flat grey). Capacity contention across 53 sampled
+# types, not undertraining.
+#
+# Size picked by measuring T4x2, not by parameter count (kaggle/08-size-probe.py):
+#
+#     22.4M anchor   0.64 s/step     (real sessions ran 0.78-0.84 with data loading)
+#     64.8M          2.00 s/step
+#     70.5M          1.69 s/step  <- more parameters than 64.8M, and FASTER
+#     83.8M          1.92 s/step
+#
+# 70.5M wins because (1,2,3,4) keeps capacity away from the 128px level, where
+# UNet compute actually goes. Adding ~30% for data loading puts it near 2.2 s/step,
+# so 40000 steps is ~24h — one week's quota with room left for G-Micro, where 60000
+# steps would have needed 36h and starved the other projects.
+#
+# 40000 rather than 60000 is a considered trade: the 22.4M model had clean filters
+# by step 24000, so a 3x larger one reaching them inside 40000 is a fair
+# expectation. If objects are still blobs at 40000, the answer is not "more steps"
+# — it is latent-space diffusion, which is the next real option.
+#
+# Architecture changed, so nothing resumes: this trains from zero and the kernel
+# must have gedit-ckpt DETACHED. The step-59200 checkpoint survives as a dataset
+# version if the old model is ever wanted back.
+BATCH, ACCUM, WARMUP = 32, 1, 500
+TOTAL_STEPS = 40000
+SESSION_STEPS = 15000
+LR_DECAY_STEPS = 40000
 TEXT_DROPOUT = 0.1
 
 if os.path.exists(f"{WORK}/gedit"):

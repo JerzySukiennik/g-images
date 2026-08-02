@@ -204,15 +204,26 @@ class Upsample(nn.Module):
 
 
 class UNet(nn.Module):
-    """base_channels=64, channel_mults=(1,2,4,4) -> 64/128/256/256 at
-    128/64/32/16px, 2 ResBlocks per level. Cross-attention to the edit type's
+    """base_channels=128, channel_mults=(1,2,3,4) -> 128/256/384/512 at
+    128/64/32/16px, 2 ResBlocks per level. 70.5M parameters.
+
+    v5 sizing, chosen by measurement on real T4x2 (kaggle/08-size-probe.py) rather
+    than by parameter count. The 22.4M predecessor learned filters cleanly but
+    could not synthesize objects, and adding 40 object/semantic types visibly
+    DEGRADED the filters it already knew — capacity contention, not undertraining.
+
+    The mults matter more than the width. A 64.8M config at base 112 with
+    (1,2,4,4) measured 2.00 s/step, while this 70.5M one measured 1.69 — more
+    parameters, less time — because UNet cost is dominated by the high-resolution
+    levels, and (1,2,3,4) moves capacity down to where the feature maps are small.
+    Parameter count is a poor proxy for what a config costs to train. Cross-attention to the edit type's
     token sequence after every resolution level's ResBlocks (down and up) plus
     the bottleneck, so a transformation can be driven at multiple spatial scales
     rather than only the coarsest. Self-attention (spatial-only) also at the
     bottleneck, where it is cheapest and buys the most long-range mixing.
     """
 
-    def __init__(self, n_types, base_channels=64, channel_mults=(1, 2, 4, 4),
+    def __init__(self, n_types, base_channels=128, channel_mults=(1, 2, 3, 4),
                  token_dim=256, n_tokens=8, time_dim=256):
         super().__init__()
         self.base_channels = base_channels
