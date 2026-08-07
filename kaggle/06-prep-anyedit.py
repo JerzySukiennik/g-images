@@ -38,6 +38,7 @@ QUOTAS = [
       "background_change=25000", "replace=20000"], 0),  # done (non-add parts)
     (["add=60000"], 20),
     (["add=60000"], 30),
+    (["add=60000"], 40),   # szosty shard: wiecej roznorodnosci obiektow
 ]
 want, skip_shards = QUOTAS[SHARD]
 print(f"shard {SHARD}: {want}, skipping {skip_shards} shards", flush=True)

@@ -92,7 +92,8 @@ class PairDataset(Dataset):
     """
 
     def __init__(self, data_prefixes, split="train", flip=False, val_pairs=4,
-                 nominal_len=100_000):
+                 nominal_len=100_000, synthetic_share=0.25):
+        self.synthetic_share = synthetic_share
         self.split = split
         self.flip = flip and split == "train"
         self.shards = []
@@ -138,8 +139,8 @@ class PairDataset(Dataset):
         if split == "train":
             print(f"{len(self.shards)} shards, {len(self.image_pool)} images in split")
             print(f"{len(self.synth_ids)} synthetic types (unlimited pairs each)")
-            print(f"{len(self.by_type)} AnyEdit types; sampling uniformly over "
-                  f"{len(self.sampleable)} types total")
+            print(f"{len(self.by_type)} AnyEdit types; synthetic share "
+                  f"{self.synthetic_share:.0%}, rest spread over AnyEdit types")
             rare = sorted(self.by_type.items(), key=lambda kv: len(kv[1]))[:5]
             print("smallest: " + ", ".join(f"{TYPE_NAMES[t]}={len(v)}" for t, v in rare))
 
@@ -161,7 +162,21 @@ class PairDataset(Dataset):
 
     def __getitem__(self, i):
         if self.split == "train":
-            type_id = random.choice(self.sampleable)
+            # Sampling is no longer uniform over all types. By step 40000 the 13
+            # synthetic filters match their exact ground truth pixel for pixel,
+            # while object types are the weak point — so spending 13/53 = 25% of
+            # every batch re-teaching solved transformations is waste. The
+            # synthetic share is capped at --synthetic-share and the remainder is
+            # spread over the AnyEdit types.
+            #
+            # It is not dropped to zero: these types are the only ones with an
+            # exact ground truth, so they are also the project's regression test.
+            # Losing them would remove the one signal that tells us the model has
+            # not drifted.
+            if self.by_type and random.random() >= self.synthetic_share:
+                type_id = random.choice(sorted(self.by_type))
+            else:
+                type_id = random.choice(self.synth_ids)
             pool = self.by_type.get(type_id) or self.image_pool
             ref = random.choice(pool)
         else:
@@ -245,7 +260,8 @@ def min_snr_weights(schedule, t, gamma, prediction="v"):
 
 def main(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    train_ds = PairDataset(args.data, "train", flip=not args.no_flip)
+    train_ds = PairDataset(args.data, "train", flip=not args.no_flip,
+                            synthetic_share=args.synthetic_share)
     val_ds = PairDataset(args.data, "val")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                                num_workers=2, drop_last=True)
@@ -481,6 +497,11 @@ if __name__ == "__main__":
                          "prediction and guidance amplified it into noise. Min-SNR was designed "
                          "for epsilon-prediction; v-prediction already equalizes difficulty "
                          "across timesteps, and stacking them suppresses high noise twice.")
+    p.add_argument("--synthetic-share", type=float, default=0.25,
+                    help="fraction of each batch spent on the 13 exact-function filter "
+                         "types. They are solved by step 40000, so later runs lower this "
+                         "to redirect capacity at objects; kept above zero because they "
+                         "are the only types with a ground truth to regression-test against")
     p.add_argument("--no-flip", action="store_true",
                     help="disable horizontal-flip augmentation")
     p.add_argument("--log-every", type=int, default=20)

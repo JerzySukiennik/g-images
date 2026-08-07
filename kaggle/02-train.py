@@ -151,20 +151,28 @@ OUT = f"{WORK}/run"
 # Architecture changed, so nothing resumes: this trains from zero and the kernel
 # must have gedit-ckpt DETACHED. The step-59200 checkpoint survives as a dataset
 # version if the old model is ever wanted back.
+# --- 2026-08-08: Jurek granted 15h of quota to push quality as far as it goes ----
+#
+# Two things had to change first, or the hours would have bought nothing.
+#
+# 1. LR_DECAY_STEPS was 40000 and training is AT 40000, so the cosine schedule sat
+#    on its 1e-5 floor. Continuing would have run 28000 steps at a learning rate
+#    that barely moves the weights. Extending the horizon to 68000 warm-restarts
+#    it to ~8e-5 and decays to the floor exactly at the new target.
+#
+# 2. Sampling was uniform over 53 types, so the 13 synthetic filters took 25% of
+#    every batch. Those match their exact ground truth pixel for pixel by now;
+#    objects are the weak point. SYNTHETIC_SHARE drops them to 10%, moving that
+#    capacity to the AnyEdit types. Not to zero: they are the only types with a
+#    ground truth, so they double as the regression test that says the model
+#    hasn't drifted.
 BATCH, ACCUM, WARMUP = 32, 1, 500
-TOTAL_STEPS = 40000
-SESSION_STEPS = 5000   # short verification run: 5.5h of quota left and the
-                       # Min-SNR fix is unproven. 5000 steps (~2.6h) is enough to
-                       # measure whether t=999 error drops from 0.26 toward the
-                       # 0.01-0.02 seen everywhere else; spending the whole
-                       # remaining budget on an unverified fix is the mistake this
-                       # project has already paid for several times.
-LR_DECAY_STEPS = 40000
+TOTAL_STEPS = 68000
+SESSION_STEPS = 15000
+LR_DECAY_STEPS = 68000
 TEXT_DROPOUT = 0.1
-# 0 = plain MSE. See train/train.py's --min-snr-gamma help: with v-prediction the
-# gamma=5 weighting collapses to 3.75e-33 at t=999, and the step-30000 checkpoint
-# measured 26% relative error at exactly that timestep against 1-2% elsewhere.
 MIN_SNR_GAMMA = 0.0
+SYNTHETIC_SHARE = 0.10
 
 if os.path.exists(f"{WORK}/gedit"):
     subprocess.run(["git", "-C", f"{WORK}/gedit", "pull", "--ff-only"], check=True)
@@ -225,6 +233,7 @@ cmd = [sys.executable, "train/train.py",
        "--lr-decay-steps", str(LR_DECAY_STEPS),
        "--text-dropout", str(TEXT_DROPOUT),
        "--min-snr-gamma", str(MIN_SNR_GAMMA),
+       "--synthetic-share", str(SYNTHETIC_SHARE),
        "--warmup", str(WARMUP),
        "--eval-every", "200",
        "--ckpt-every", "200",
