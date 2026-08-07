@@ -471,8 +471,16 @@ if __name__ == "__main__":
                          "scale in model/scheduler.py's sampler")
     p.add_argument("--ema-decay", type=float, default=0.9995,
                     help="EMA decay for the sampling weights; 0 disables EMA")
-    p.add_argument("--min-snr-gamma", type=float, default=5.0,
-                    help="Min-SNR-gamma loss weighting (paper default 5); 0 = plain MSE")
+    p.add_argument("--min-snr-gamma", type=float, default=0.0,
+                    help="Min-SNR-gamma loss weighting; 0 = plain MSE, which is the right "
+                         "choice with v-prediction. MEASURED 2026-08-06: with gamma=5 and the "
+                         "cosine schedule, the v-form weight min(SNR,g)/(SNR+1) is 3.75e-33 at "
+                         "t=999 — the timestep DDIM starts from. The step-30000 model had 26% "
+                         "relative error there against 1-2% everywhere else, so the first "
+                         "sampling step (which sets global structure) was computed from a bad "
+                         "prediction and guidance amplified it into noise. Min-SNR was designed "
+                         "for epsilon-prediction; v-prediction already equalizes difficulty "
+                         "across timesteps, and stacking them suppresses high noise twice.")
     p.add_argument("--no-flip", action="store_true",
                     help="disable horizontal-flip augmentation")
     p.add_argument("--log-every", type=int, default=20)

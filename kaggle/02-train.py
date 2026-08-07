@@ -156,6 +156,10 @@ TOTAL_STEPS = 40000
 SESSION_STEPS = 15000
 LR_DECAY_STEPS = 40000
 TEXT_DROPOUT = 0.1
+# 0 = plain MSE. See train/train.py's --min-snr-gamma help: with v-prediction the
+# gamma=5 weighting collapses to 3.75e-33 at t=999, and the step-30000 checkpoint
+# measured 26% relative error at exactly that timestep against 1-2% elsewhere.
+MIN_SNR_GAMMA = 0.0
 
 if os.path.exists(f"{WORK}/gedit"):
     subprocess.run(["git", "-C", f"{WORK}/gedit", "pull", "--ff-only"], check=True)
@@ -215,6 +219,7 @@ cmd = [sys.executable, "train/train.py",
        "--max-steps", str(STEPS),
        "--lr-decay-steps", str(LR_DECAY_STEPS),
        "--text-dropout", str(TEXT_DROPOUT),
+       "--min-snr-gamma", str(MIN_SNR_GAMMA),
        "--warmup", str(WARMUP),
        "--eval-every", "200",
        "--ckpt-every", "200",
