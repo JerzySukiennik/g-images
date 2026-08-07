@@ -153,7 +153,12 @@ OUT = f"{WORK}/run"
 # version if the old model is ever wanted back.
 BATCH, ACCUM, WARMUP = 32, 1, 500
 TOTAL_STEPS = 40000
-SESSION_STEPS = 15000
+SESSION_STEPS = 5000   # short verification run: 5.5h of quota left and the
+                       # Min-SNR fix is unproven. 5000 steps (~2.6h) is enough to
+                       # measure whether t=999 error drops from 0.26 toward the
+                       # 0.01-0.02 seen everywhere else; spending the whole
+                       # remaining budget on an unverified fix is the mistake this
+                       # project has already paid for several times.
 LR_DECAY_STEPS = 40000
 TEXT_DROPOUT = 0.1
 # 0 = plain MSE. See train/train.py's --min-snr-gamma help: with v-prediction the
