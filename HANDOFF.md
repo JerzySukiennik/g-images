@@ -147,7 +147,20 @@ still `gedit-*`. The project was renamed to G-Images but **these were deliberate
 not renamed** — `kaggle/02-train.py` finds its input by globbing
 `**/gedit_images.bin`, and five existing prep outputs carry those names.
 
-**9. macOS/MPS is a poor proxy and lacks float64.** The cosine schedule builds its
+**9. MPS returns ZEROS instead of erroring when the Mac is out of memory.** This
+one is vicious: no exception, no warning, just silently wrong numbers that look
+plausible. It was caught only because `torch.randn(...).norm()` printed 0.0, which
+is physically impossible. It had already invalidated a per-timestep measurement
+AND made a working `black_and_white` render as pure colour noise — the model was
+fine, the machine was not (76 MB free RAM, two headless Blender processes at 240%
+CPU, load average 37 on an 8-core i9).
+
+**Before trusting any local measurement, assert that your first random tensor has
+non-zero norm**, and if the machine is loaded, run evaluation on CPU. It is far
+slower and completely trustworthy. Do not kill other people's Blender/render
+processes to free memory — another session is probably using them.
+
+**10. macOS/MPS is a poor proxy and lacks float64.** The cosine schedule builds its
 cumulative product on CPU in float64 and then moves — CUDA accepted the device
 version, MPS raised outright, so the Kaggle run was fine while every local
 evaluation would have died.
