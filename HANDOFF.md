@@ -48,9 +48,14 @@ the channel axis is always the cheapest way to lower the loss.
 
 ## Current state
 
-**Training in progress.** 70.5M model, from scratch, target 40000 steps, running
-in ~15000-step sessions. Session 1 (0 → 15000) and session 2 (15000 → 30000) are
-done. One session remains.
+**Training in progress.** 70.5M model, from scratch, target 40000 steps. Sessions
+done: 0→15000, 15000→30000, and a short 30000→35000 verification run after the
+Min-SNR fix. **5000 steps remain.**
+
+Checkpoints now move between runs via `kernel_sources` — `gedit-train` and
+`gedit-train-b` alternate, each reading the other's output. This skips a ~2h
+round trip through a home connection per session; the dataset upload path is only
+needed if that chain is ever broken.
 
 - Repo HEAD: see `git log`; everything is pushed.
 - Checkpoints live as Kaggle dataset `jerzysukiennik/gedit-ckpt` (versioned).
@@ -74,24 +79,52 @@ desaturations.
 
 ### What does not work yet
 
-**Object addition.** `add_hat` and friends place *something* localized near the
-right region, and different types produce different textures — so conditioning
-and localization both work — but they are blobs, not recognizable objects.
+**Object addition is close but not there.** At step 35000 `add_hat` and `add_cat`
+place a distinct, edged object in the right region with type-appropriate texture —
+a real advance over the 22.4M model's blurred smudges — but they are not yet
+recognizable as the named object.
 
 **`time_night`** goes the wrong way (warmer, not darker) despite 6382 examples.
 
-### The open question
+### The open question, and a caveat about how it was diagnosed
 
-At 22.4M, going from step 41200 to 59200 did **not** sharpen objects and visibly
-**degraded** `black_and_white`, which had been clean earlier. That is capacity
-contention across 53 sampled types, not undertraining — which is why the model is
-now 3x larger.
+At 22.4M, going from step 41200 to 59200 did not sharpen objects and appeared to
+degrade `black_and_white`. That drove the decision to triple the model.
 
-**If objects are still blobs at step 40000, the answer stops being "a bigger
-pixel-space model" and becomes latent-space diffusion** — train an autoencoder,
-run diffusion on its codes. A 64×64 latent is 4x fewer points than 128×128 pixels
-at the same output resolution, which is precisely how Stable Diffusion affords to
-synthesize objects.
+**Treat the visual half of that evidence with suspicion.** Landmine 9 below was
+discovered afterwards: MPS silently returns zeros under memory pressure, and it
+had made a perfectly good `black_and_white` render as pure noise. The same machine
+state may have exaggerated the earlier apparent regression. What *is* solid is the
+numeric side, recomputed on CPU with a non-zero-noise assertion — and it found a
+real, separate bug (Min-SNR zeroing the weight at t=999, see below).
+
+So the honest status of "22.4M hit a capacity ceiling" is: plausible, partly
+measured, and not fully re-verified since the MPS problem came to light. If the
+70.5M model still cannot form objects at step 40000, **re-confirm on CPU before
+concluding anything**, then the next step is latent-space diffusion — train an
+autoencoder and run diffusion on its codes. A 64×64 latent is 4x fewer points than
+128×128 pixels at the same output resolution, which is how Stable Diffusion
+affords to synthesize objects at all.
+
+### The Min-SNR bug, worth understanding
+
+The step-30000 model produced noise at guidance 3.0 while posting the best val
+loss the project had recorded, on a textbook-clean training curve with healthy
+weights. Per-timestep measurement against exact synthetic ground truth showed the
+model was 5-20x worse at **exactly t=999** and near-perfect everywhere else — the
+timestep DDIM starts from, so the first step (which sets global structure) was
+computed from a bad prediction.
+
+Cause: the v-prediction Min-SNR weight `min(SNR,gamma)/(SNR+1)` evaluates to
+**3.75e-33** at t=999 under a cosine schedule with zero terminal SNR. The model was
+trained to ignore precisely the region it must generate from. Val loss hid it
+because at high t the v target is approximately `-x0`, and since `after` resembles
+`before` for most edits, copying the input scores well while producing nothing
+useful.
+
+Min-SNR was designed for epsilon-prediction; v-prediction already equalizes
+difficulty across timesteps. **Default is now plain MSE** (`--min-snr-gamma 0`),
+and 5000 steps of it took t=999 error from 0.235 to 0.094.
 
 ---
 
