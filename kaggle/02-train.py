@@ -166,10 +166,34 @@ OUT = f"{WORK}/run"
 #    capacity to the AnyEdit types. Not to zero: they are the only types with a
 #    ground truth, so they double as the regression test that says the model
 #    hasn't drifted.
+# --- 2026-08-08: 98.3M od zera, z mieszana precyzja --------------------------
+#
+# Jurek: "ten skok z 20 do 70 byl ogromny, dociagnijmy do 100-150M". Dwie sondy
+# na prawdziwym T4 ustawily te decyzje:
+#
+#   fp32:  kazda konfiguracja powyzej 70.5M konczyla sie OutOfMemory przy batchu 32
+#   AMP:   70.5M 1.63 -> 0.96 s/krok, VRAM 12.7 -> 10.7 GB
+#          98.3M  1.83 s/krok, 12.8 GB  <- miesci sie
+#          119.4M 2.05 s/krok, 14.4 GB  <- miesci sie, ale 14.4 z 16 to zaden zapas
+#          142.5M OOM nawet z AMP
+#
+# Petla treningowa NIGDY nie uzywala mieszanej precyzji — fp32 na kartach, ktorych
+# rdzenie tensor istnieja wlasnie po to. To bylo przeoczenie kosztujace polowe
+# predkosci przez caly projekt, i jednoczesnie powod, dla ktorego wieksze modele
+# wygladaly na niemozliwe.
+#
+# 98.3M zamiast 119.4M: roznica pojemnosci niewielka, a 14.4/16 GB oznacza, ze
+# dowolny skok zuzycia wywala sesje w polowie.
+#
+# 36000 krokow to tyle, ile miesci sie w 20h przy ~1.98 s/krok z narzutem danych.
+# Uczciwie: model 70.5M potrzebowal ~40000 krokow, zeby dojsc tam gdzie jest, wiec
+# ten skonczy mniej wiecej w tym samym miejscu, tylko z 40% wieksza pojemnoscia.
+# Checkpoint 70.5M zostaje nietkniety jako punkt odniesienia i awaryjny powrot.
 BATCH, ACCUM, WARMUP = 32, 1, 500
-TOTAL_STEPS = 68000
+BASE_CHANNELS = 152
+TOTAL_STEPS = 36000
 SESSION_STEPS = 15000
-LR_DECAY_STEPS = 68000
+LR_DECAY_STEPS = 36000
 TEXT_DROPOUT = 0.1
 MIN_SNR_GAMMA = 0.0
 SYNTHETIC_SHARE = 0.10
@@ -234,6 +258,7 @@ cmd = [sys.executable, "train/train.py",
        "--text-dropout", str(TEXT_DROPOUT),
        "--min-snr-gamma", str(MIN_SNR_GAMMA),
        "--synthetic-share", str(SYNTHETIC_SHARE),
+       "--base-channels", str(BASE_CHANNELS),
        "--warmup", str(WARMUP),
        "--eval-every", "200",
        "--ckpt-every", "200",

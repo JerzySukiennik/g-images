@@ -36,7 +36,7 @@ def main(ckpt_path, image_path, out_path, guidance=3.0, steps=100):
     assert float(torch.randn(1, 3, 128, 128, device=dev).norm()) > 50, "backend zwraca zera"
 
     ck = torch.load(ckpt_path, map_location=dev)
-    model = UNet(n_types=N_TYPES).to(dev).eval()
+    model = UNet(**ck.get("arch", dict(n_types=N_TYPES))).to(dev).eval()
     state = ck.get("ema", ck["model"])
     model.load_state_dict({k: v.to(model.state_dict()[k].dtype) for k, v in state.items()})
     print(f"step {ck['step']} on {dev}", flush=True)

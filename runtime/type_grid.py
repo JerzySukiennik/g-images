@@ -35,7 +35,7 @@ def main(args):
     device = "cuda" if torch.cuda.is_available() else (
         "mps" if torch.backends.mps.is_available() else "cpu")
     ckpt = torch.load(args.ckpt, map_location=device)
-    model = UNet(n_types=N_TYPES).to(device).eval()
+    model = UNet(**ckpt.get("arch", dict(n_types=N_TYPES))).to(device).eval()
     if "ema" in ckpt and not args.no_ema:
         model.load_state_dict({k: v.to(model.state_dict()[k].dtype)
                                 for k, v in ckpt["ema"].items()})

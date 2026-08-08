@@ -267,7 +267,9 @@ def main(args):
                                num_workers=2, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
-    model = UNet(n_types=N_TYPES).to(device)
+    arch = dict(n_types=N_TYPES, base_channels=args.base_channels,
+                channel_mults=tuple(args.channel_mults))
+    model = UNet(**arch).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"UNet params: {n_params/1e6:.1f}M  ({N_TYPES} edit types)")
 
@@ -280,6 +282,16 @@ def main(args):
                                   prediction=args.prediction, device=device)
     print(f"schedule: {args.noise_schedule}, predicting: {args.prediction}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    # Mixed precision. The T4s have tensor cores that fp32 training never touches:
+    # measured on this exact model, AMP took 1.63 s/step down to 0.96 and peak VRAM
+    # from 12.7 GB to 10.7. That memory is what decides whether a bigger model fits
+    # at all — every config above 70.5M OOM'd in fp32 and 98.3M fits comfortably
+    # with AMP. Parameters stay fp32 (autocast only casts operations), so EMA and
+    # the optimizer are unaffected.
+    use_amp = args.amp and device == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    if use_amp:
+        print("mixed precision: on")
 
     if args.text_dropout > 0:
         print(f"conditioning dropout: type -> null {args.text_dropout}, "
@@ -385,7 +397,11 @@ def main(args):
             t = torch.randint(0, schedule.timesteps, (b,), device=device)
             noisy_after, noise = schedule.q_sample(after, t)
             target = schedule.target(after, noise, t)
-            pred = model(torch.cat([noisy_after, before], dim=1), t, type_ids)
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                pred = model(torch.cat([noisy_after, before], dim=1), t, type_ids)
+            # Loss in fp32 even under autocast: the squared error of small
+            # residuals is exactly where fp16 loses the digits that matter.
+            pred = pred.float()
             if args.min_snr_gamma > 0:
                 w = min_snr_weights(schedule, t, args.min_snr_gamma,
                                      prediction=args.prediction)
@@ -393,7 +409,7 @@ def main(args):
             else:
                 loss = F.mse_loss(pred, target)
             loss = loss / args.grad_accum
-            loss.backward()
+            scaler.scale(loss).backward()
             loss_accum += loss.item()
 
         # Linear warmup, then cosine decay to --lr-min. A constant LR all the
@@ -414,7 +430,8 @@ def main(args):
             lr = args.lr_min + 0.5 * (args.lr - args.lr_min) * (1 + math.cos(math.pi * progress))
         for g in opt.param_groups:
             g["lr"] = lr
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         step += 1
         if ema is not None:
             ema.update(raw_model)
@@ -438,8 +455,9 @@ def main(args):
                     t = torch.randint(0, schedule.timesteps, (b,), generator=gen).to(device)
                     noisy_after, noise = schedule.q_sample(after, t)
                     target = schedule.target(after, noise, t)
-                    pred = model(torch.cat([noisy_after, before], dim=1), t, type_ids)
-                    vloss += F.mse_loss(pred, target).item()
+                    with torch.cuda.amp.autocast(enabled=use_amp):
+                        pred = model(torch.cat([noisy_after, before], dim=1), t, type_ids)
+                    vloss += F.mse_loss(pred.float(), target).item()
                     n_batches += 1
             print(f"  val loss {vloss / max(n_batches, 1):.4f}")
             model.train()
@@ -450,7 +468,11 @@ def main(args):
             # internal data.pkl/data/N files the moment it's downloaded from
             # or uploaded to Kaggle as a Dataset, breaking the exact-filename
             # match every resume step depends on.
-            blob = {"model": raw_model.state_dict(), "opt": opt.state_dict(), "step": step}
+            # The architecture travels WITH the weights. Two model sizes now exist
+            # (70.5M and 98.3M) and an evaluation script that guesses the width
+            # simply fails to load — or worse, a future size guesses wrong silently.
+            blob = {"model": raw_model.state_dict(), "opt": opt.state_dict(),
+                    "step": step, "arch": arch}
             if ema is not None:
                 blob["ema"] = ema.state_dict()
             torch.save(blob, ckpt_path, _use_new_zipfile_serialization=False)
@@ -502,6 +524,14 @@ if __name__ == "__main__":
                          "types. They are solved by step 40000, so later runs lower this "
                          "to redirect capacity at objects; kept above zero because they "
                          "are the only types with a ground truth to regression-test against")
+    p.add_argument("--base-channels", type=int, default=128,
+                    help="UNet width. 128 -> 70.5M, 152 -> 98.3M. Must be divisible by 8 "
+                         "(GroupNorm groups). Anything above ~168 OOMs on a T4 even with AMP")
+    p.add_argument("--channel-mults", type=int, nargs="+", default=[1, 2, 3, 4])
+    p.add_argument("--amp", type=int, default=1,
+                    help="mixed precision (1/0). Measured on T4x2: 1.63 -> 0.96 s/step "
+                         "and 12.7 -> 10.7 GB peak. Off only for debugging a numerical "
+                         "problem you suspect fp16 caused")
     p.add_argument("--no-flip", action="store_true",
                     help="disable horizontal-flip augmentation")
     p.add_argument("--log-every", type=int, default=20)
