@@ -31,6 +31,7 @@ from model.scheduler import DiffusionSchedule
 from data.edit_types import N_TYPES
 
 BATCH, WARMUP, MEASURE = 32, 5, 25
+AMP = True   # mieszana precyzja — patrz komentarz w step()
 CONFIGS = [
     ("anchor 70.5M", dict(base_channels=128, channel_mults=(1, 2, 3, 4))),
     ("98.3M", dict(base_channels=152, channel_mults=(1, 2, 3, 4))),
@@ -40,6 +41,7 @@ CONFIGS = [
 
 dev = "cuda"
 print(f"GPUs: {torch.cuda.device_count()} x {torch.cuda.get_device_name(0)}\n")
+print(f"AMP: {AMP}")
 print(f"{'config':<16}{'params':>10}{'s/step':>10}{'60k steps':>12}{'VRAM GB':>10}")
 
 for name, kw in CONFIGS:
@@ -56,14 +58,22 @@ for name, kw in CONFIGS:
         after = torch.randn(BATCH, 3, 128, 128, device=dev)
         ids = torch.randint(0, N_TYPES, (BATCH,), device=dev)
 
+        scaler = torch.cuda.amp.GradScaler(enabled=AMP)
+
         def step():
             opt.zero_grad()
             t = torch.randint(0, sched.timesteps, (BATCH,), device=dev)
             noisy, noise = sched.q_sample(after, t)
             target = sched.target(after, noise, t)
-            pred = model(torch.cat([noisy, before], dim=1), t, ids)
-            F.mse_loss(pred, target).backward()
-            opt.step()
+            # T4 has tensor cores; fp32 training leaves both memory and speed on
+            # the table. Halving activation memory is also what decides whether a
+            # bigger model fits at all — every config above 70.5M OOM'd in fp32.
+            with torch.cuda.amp.autocast(enabled=AMP):
+                pred = model(torch.cat([noisy, before], dim=1), t, ids)
+                loss = F.mse_loss(pred.float(), target)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
 
         for _ in range(WARMUP):
             step()
