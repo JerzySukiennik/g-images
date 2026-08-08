@@ -32,10 +32,10 @@ from data.edit_types import N_TYPES
 
 BATCH, WARMUP, MEASURE = 32, 5, 25
 CONFIGS = [
-    ("anchor 22.4M", dict(base_channels=64, channel_mults=(1, 2, 4, 4))),
-    ("64.8M", dict(base_channels=112, channel_mults=(1, 2, 4, 4))),
-    ("70.5M", dict(base_channels=128, channel_mults=(1, 2, 3, 4))),
-    ("83.8M", dict(base_channels=128, channel_mults=(1, 2, 4, 4))),
+    ("anchor 70.5M", dict(base_channels=128, channel_mults=(1, 2, 3, 4))),
+    ("98.3M", dict(base_channels=152, channel_mults=(1, 2, 3, 4))),
+    ("119.4M", dict(base_channels=168, channel_mults=(1, 2, 3, 4))),
+    ("142.5M", dict(base_channels=184, channel_mults=(1, 2, 3, 4))),
 ]
 
 dev = "cuda"
