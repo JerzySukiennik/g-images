@@ -335,7 +335,15 @@ def main(args):
                 f"train from scratch instead of resuming, or detach the stale "
                 f"checkpoint dataset from the kernel's inputs.")
         raw_model.load_state_dict(got)
-        opt.load_state_dict(ckpt["opt"])
+        if "opt" in ckpt:
+            opt.load_state_dict(ckpt["opt"])
+        else:
+            # A checkpoint salvaged from a run that was killed mid-save can hold
+            # complete weights and nothing else — torch writes the sections in
+            # order, so 'model' lands whole before 'opt' is even started. Fresh
+            # AdamW moments cost a short transient at resume; refusing to start
+            # would cost every step that produced these weights.
+            print("no optimizer state in checkpoint — AdamW moments start at rest")
 
         # Growing the embedding table is only half the job: AdamW keeps two
         # momentum tensors PER PARAMETER, and the ones just restored are still
@@ -475,7 +483,19 @@ def main(args):
                     "step": step, "arch": arch}
             if ema is not None:
                 blob["ema"] = ema.state_dict()
-            torch.save(blob, ckpt_path, _use_new_zipfile_serialization=False)
+
+            # Write to a temp file and rename, rather than saving over ckpt.pt.
+            # Saving in place means the only copy is a half-written file for the
+            # ~20s the save takes, and on 2026-08-09 a Kaggle session was killed
+            # inside exactly that window: 8h11m of training, 412 MB of a 1.57 GB
+            # file, and nothing recoverable. Not "most of the weights" — torch
+            # orders storages on disk by key, not by section, so the surviving
+            # 531 storages were all optimizer moments and not one of the 321
+            # weight tensors. rename() is atomic, so ckpt.pt is always either the
+            # previous complete checkpoint or the new one, never a stump.
+            tmp_path = ckpt_path + ".tmp"
+            torch.save(blob, tmp_path, _use_new_zipfile_serialization=False)
+            os.replace(tmp_path, ckpt_path)
 
     print(f"done — {args.max_steps} steps in {(time.time()-t0)/3600:.1f}h")
 
