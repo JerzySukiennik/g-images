@@ -192,7 +192,14 @@ OUT = f"{WORK}/run"
 BATCH, ACCUM, WARMUP = 32, 1, 500
 BASE_CHANNELS = 152
 TOTAL_STEPS = 36000
-SESSION_STEPS = 15000
+# 12000, nie 15000: sesja 0->15000 dostala SIGKILL na kroku 14800 po 8h11m, przy
+# zupelnie plaskim tempie (1922 s/1000 na starcie, 2007 s/1000 na koncu) i bez
+# jednego ostrzezenia o pamieci. Rowne tempo az do naglej smierci to limit z
+# zewnatrz, nie wyciek — 15000 krokow po ~1.99 s/krok po prostu nie miesci sie w
+# oknie sesji. 12000 to ~6.6h, czyli z zapasem. Checkpoint co 200 krokow przezyl,
+# wiec stracone bylo 200 krokow, ale kernel skonczyl jako ERROR i autochain
+# slusznie odmowil lancuchowania dalej.
+SESSION_STEPS = 12000
 LR_DECAY_STEPS = 36000
 TEXT_DROPOUT = 0.1
 MIN_SNR_GAMMA = 0.0
