@@ -237,14 +237,33 @@ for d in data_prefixes:
     print("   ", d)
 
 os.makedirs(OUT, exist_ok=True)
-hits_ckpt = sorted(glob.glob("/kaggle/input/**/ckpt.pt", recursive=True))
+
+# CKPT_URL exists because Kaggle has TWO different notions of "a kernel's output".
+# kernel_sources mounts the last version that COMPLETED; the REST API serves the
+# last version that RAN. A session that trains for 8h and then dies leaves its
+# checkpoint reachable only by the second one — mounting silently hands you a
+# much older checkpoint from a previous architecture instead, which is exactly
+# what happened on 2026-08-09 (mounted step 55000 / 70.5M over step 14800 /
+# 98.3M). Set CKPT_URL to the signed URL from
+#   GET /api/v1/kernels/output?userName=..&kernelSlug=..  ->  files[].url
+# to pull that checkpoint straight into the kernel over the internet, with no
+# detour through a home connection. The URL is time-limited: generate it right
+# before pushing, not hours ahead.
+ckpt_url = os.environ.get("CKPT_URL", "").strip()
 resume = []
-if hits_ckpt:
-    shutil.copy(hits_ckpt[0], f"{OUT}/ckpt.pt")
+if ckpt_url:
+    print("downloading checkpoint from CKPT_URL")
+    subprocess.run(["curl", "-fsSL", ckpt_url, "-o", f"{OUT}/ckpt.pt"], check=True)
     resume = ["--resume"]
-    print(f"resuming from {hits_ckpt[0]}")
+    print(f"downloaded {os.path.getsize(f'{OUT}/ckpt.pt')/1e9:.2f} GB")
 else:
-    print("starting from scratch")
+    hits_ckpt = sorted(glob.glob("/kaggle/input/**/ckpt.pt", recursive=True))
+    if hits_ckpt:
+        shutil.copy(hits_ckpt[0], f"{OUT}/ckpt.pt")
+        resume = ["--resume"]
+        print(f"resuming from {hits_ckpt[0]}")
+    else:
+        print("starting from scratch")
 
 # Read the resume point so this session's ceiling is start + SESSION_STEPS rather
 # than the global total — see the SESSION_STEPS comment above.
@@ -252,6 +271,19 @@ start_step = 0
 if resume:
     import torch
     start_step = torch.load(f"{OUT}/ckpt.pt", map_location="cpu").get("step", 0)
+
+# Refuse to run backwards. A checkpoint from beyond TOTAL_STEPS means the wrong
+# one got attached — on 2026-08-09 that printed the nonsense "session: step 55000
+# -> 36000" and burned a GPU slot before train.py caught the mismatch a minute
+# later. The step number alone is enough to know something is wrong, so say so
+# here, loudly, instead of letting the run start.
+if start_step >= TOTAL_STEPS:
+    raise SystemExit(
+        f"checkpoint is at step {start_step}, at or past the target {TOTAL_STEPS}. "
+        "Almost certainly the wrong checkpoint — check what is mounted under "
+        "/kaggle/input, or set CKPT_URL to the one you actually want."
+    )
+
 STEPS = min(TOTAL_STEPS, start_step + SESSION_STEPS)
 print(f"session: step {start_step} -> {STEPS} (global target {TOTAL_STEPS})")
 
