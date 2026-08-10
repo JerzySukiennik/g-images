@@ -59,7 +59,7 @@ QUOTAS = [
 # Offsets continue past the 128px corpus, which consumed shards 0-49 of 'add'.
 #
 # The types differ per shard here, and that is not arbitrary: **'add' is running
-# out.** AnyEdit holds exactly 60 shards of it (6489 rows each) and the 128px
+# out.** AnyEdit holds 62 shards of it (~6489 rows each) and the 128px
 # corpus already consumed 0-49. The first attempt at this table asked for offsets
 # 50/57/64/71 by extrapolating the old pattern, and the last two fetched NOTHING
 # — both kernels reported COMPLETE while writing 0.0 MB files. Status is not
@@ -73,7 +73,7 @@ QUOTAS = [
 # remove 15, replace 13, appearance_alter 11.
 QUOTAS_HI = [
     (["add=40000"], 50),                 # the last of 'add' — shards 50-56
-    (["add=40000"], 57),                 # only ~19k really available; 'add' ends here
+    (["add=40000"], 57),                 # only ~32k really available; 'add' ends here
     (["color_alter=40000"], 0),          # untouched type, 50 shards
     (["background_change=40000"], 10),   # 128px took 0-3; plenty left
 ]
