@@ -14,7 +14,18 @@ import sys
 
 REPO = "https://github.com/JerzySukiennik/g-images.git"
 WORK = "/kaggle/working"
-RES = 128
+
+# Resolution and output prefix come from the environment so one script serves
+# both corpora. G-Image 2.2 needs 256px sources: the plan is latent diffusion, so
+# these pixels train the autoencoder and are then encoded once into latents that
+# are ~12x smaller than the images they came from.
+#
+# The prefix MUST differ between corpora. train/train.py finds data by globbing
+# **/<prefix>_images.bin across everything mounted, so a 256px shard sharing the
+# 'gedit' prefix would be silently concatenated into a 128px training run — a
+# resolution mismatch that no error message would explain.
+RES = int(os.environ.get("GEDIT_RES", "128"))
+PREFIX = os.environ.get("GEDIT_PREFIX", "gedit")
 
 SHARD = int(os.environ.get("GEDIT_SHARD", "0"))
 
@@ -40,7 +51,22 @@ QUOTAS = [
     (["add=60000"], 30),
     (["add=60000"], 40),   # szosty shard: wiecej roznorodnosci obiektow
 ]
-want, skip_shards = QUOTAS[SHARD]
+
+# 256px quotas are smaller per shard for a pure storage reason: a pair costs
+# 2 x 256 x 256 x 3 = 384 KB, four times the 96 KB it costs at 128px, so the
+# 60000-pair quota that fills 5.8 GB at 128px would want 23 GB — past Kaggle's
+# 20 GB notebook output limit. 40000 pairs lands at ~15 GB, with room to spare.
+# Offsets continue past the 128px corpus, which consumed shards 0-49 of 'add'.
+QUOTAS_HI = [
+    (["add=40000"], 50),
+    (["add=40000"], 57),
+    (["add=40000"], 64),
+    (["add=40000"], 71),
+]
+
+table = QUOTAS if RES == 128 else QUOTAS_HI
+want, skip_shards = table[SHARD]
+print(f"res {RES}px, prefix '{PREFIX}', {len(table)}-shard table", flush=True)
 print(f"shard {SHARD}: {want}, skipping {skip_shards} shards", flush=True)
 
 if os.path.exists(f"{WORK}/gedit"):
@@ -59,7 +85,7 @@ except Exception as e:
     print(f"no HF token ({type(e).__name__}) — downloading anonymously, slower")
 
 subprocess.run([sys.executable, "data/fetch_anyedit.py",
-                "--res", str(RES), "--out-prefix", f"{WORK}/gedit",
+                "--res", str(RES), "--out-prefix", f"{WORK}/{PREFIX}",
                 "--skip-shards", str(skip_shards),
                 "--want"] + want, check=True)
 
