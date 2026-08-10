@@ -57,11 +57,25 @@ QUOTAS = [
 # 60000-pair quota that fills 5.8 GB at 128px would want 23 GB — past Kaggle's
 # 20 GB notebook output limit. 40000 pairs lands at ~15 GB, with room to spare.
 # Offsets continue past the 128px corpus, which consumed shards 0-49 of 'add'.
+#
+# The types differ per shard here, and that is not arbitrary: **'add' is running
+# out.** AnyEdit holds exactly 60 shards of it (6489 rows each) and the 128px
+# corpus already consumed 0-49. The first attempt at this table asked for offsets
+# 50/57/64/71 by extrapolating the old pattern, and the last two fetched NOTHING
+# — both kernels reported COMPLETE while writing 0.0 MB files. Status is not
+# content; check `wrote ... for N pairs` in the log.
+#
+# Drawing from other types costs nothing here, because the first consumer of this
+# corpus is the AUTOENCODER, and it does not care what edit an image illustrates —
+# it only learns to compress and reconstruct pixels. Diversity is if anything
+# better for that. Remaining stock, from data/anyedit_shardmap.json:
+# background_change 63 shards, tune_transfer 59+23, color_alter 50 (untouched),
+# remove 15, replace 13, appearance_alter 11.
 QUOTAS_HI = [
-    (["add=40000"], 50),
-    (["add=40000"], 57),
-    (["add=40000"], 64),
-    (["add=40000"], 71),
+    (["add=40000"], 50),                 # the last of 'add' — shards 50-56
+    (["add=40000"], 57),                 # only ~19k really available; 'add' ends here
+    (["color_alter=40000"], 0),          # untouched type, 50 shards
+    (["background_change=40000"], 10),   # 128px took 0-3; plenty left
 ]
 
 table = QUOTAS if RES == 128 else QUOTAS_HI
