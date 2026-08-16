@@ -191,7 +191,20 @@ OUT = f"{WORK}/run"
 # Checkpoint 70.5M zostaje nietkniety jako punkt odniesienia i awaryjny powrot.
 BATCH, ACCUM, WARMUP = 32, 1, 500
 BASE_CHANNELS = 152
-TOTAL_STEPS = 36000
+# --- 2026-08-10: 2.1 goes to 68000, the same distance G-Image 2 ran -------------
+#
+# At 36000 the comparison between them was unreadable: 98.3M at 36000 steps against
+# 70.5M at 68000 steps measures training budget, not capacity. 2.1 changed the
+# image LESS than 2 on nearly every type (32 vs 51 on season_winter, 46 vs 59 on
+# time_night), which is what an undertrained diffusion model does — and it also
+# explains 2.1's better val loss, since at high t the target is roughly a copy of
+# the input, so a model that changes less scores better without being better.
+#
+# LR_DECAY_STEPS moves with it, exactly as it did for G-Image 2 at this point: the
+# cosine schedule is sitting on its 1e-5 floor at 36000, so continuing without
+# extending the horizon would run 32000 steps at a rate that barely moves the
+# weights. Extending warm-restarts it and lands the floor on the new target.
+TOTAL_STEPS = 68000
 # 12000, nie 15000: sesja 0->15000 dostala SIGKILL na kroku 14800 po 8h11m, przy
 # zupelnie plaskim tempie (1922 s/1000 na starcie, 2007 s/1000 na koncu) i bez
 # jednego ostrzezenia o pamieci. Rowne tempo az do naglej smierci to limit z
@@ -200,7 +213,7 @@ TOTAL_STEPS = 36000
 # wiec stracone bylo 200 krokow, ale kernel skonczyl jako ERROR i autochain
 # slusznie odmowil lancuchowania dalej.
 SESSION_STEPS = 12000
-LR_DECAY_STEPS = 36000
+LR_DECAY_STEPS = 68000
 TEXT_DROPOUT = 0.1
 MIN_SNR_GAMMA = 0.0
 SYNTHETIC_SHARE = 0.10
